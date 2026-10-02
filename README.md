@@ -1,0 +1,172 @@
+# rok-db
+
+An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github.com/launchbadge/sqlx).
+
+- **One derive** — `#[derive(Model)]` gives you CRUD, a `FromRow` impl and typed column constants.
+- **Typed, model-scoped columns** — `User::EMAIL.eq(..)` can't be used to filter `Post`s, and typos are compile errors.
+- **One executor story** — every method accepts `&Db`, `&mut Tx`, `&PgPool` or `&mut PgConnection`.
+- **`Send` futures everywhere** — works in `tokio::spawn`, axum handlers, etc.
+- **Escape hatches** — `Expr::raw`, `rok_db::raw(..)`, `to_sql()` on every builder, and full access to sqlx.
+
+## Install
+
+```toml
+[dependencies]
+rok-db = { git = "https://github.com/ateeq1999/rok-db", features = ["chrono", "uuid", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+| feature   | enables                                                  |
+|-----------|----------------------------------------------------------|
+| `chrono`  | `DateTime<Utc>`, `NaiveDateTime`, `NaiveDate`, `NaiveTime` |
+| `uuid`    | `Uuid` columns                                           |
+| `json`    | `serde_json::Value` and `Json<T>` columns                 |
+| `migrate` | `Db::migrate("./migrations")`                            |
+| `full`    | all of the above                                         |
+
+## Quick start
+
+```rust
+use rok_db::prelude::*;
+
+#[derive(Debug, Clone, Model)]          // table: "users"
+struct User {
+    #[rok(primary_key, generated)]      // BIGSERIAL, filled in by Postgres
+    id: i64,
+    email: String,
+    name: Option<String>,
+    age: i32,
+}
+
+#[tokio::main]
+async fn main() -> rok_db::Result<()> {
+    let db = Db::connect_env().await?;  // reads DATABASE_URL
+
+    // Create
+    let ann = User { id: 0, email: "ann@example.com".into(), name: None, age: 31 }
+        .insert(&db)
+        .await?;
+
+    // Read
+    let user = User::find_or_fail(&db, ann.id).await?;
+    let adults = User::filter(User::AGE.gte(18))
+        .filter(User::NAME.is_not_null().or(User::EMAIL.ends_with("@example.com")))
+        .order_by(User::AGE.desc())
+        .limit(10)
+        .all(&db)
+        .await?;
+
+    // Update
+    let mut user = user;
+    user.name = Some("Ann".into());
+    let user = user.save(&db).await?;
+
+    // Delete
+    user.delete(&db).await?;
+    Ok(())
+}
+```
+
+## Defining models
+
+```rust
+#[derive(Model)]
+#[rok(table = "app.blog_posts")]        // default: snake_case plural of the struct name
+struct Post {
+    #[rok(primary_key)]                 // default: the field named `id`
+    slug: String,
+    #[rok(column = "author_id")]        // column name differs from the field
+    author: i64,
+    #[rok(generated)]                   // DB default / trigger: read but never written
+    created_at: chrono::DateTime<chrono::Utc>,
+    #[rok(skip)]                        // not a column; Default::default() on load
+    rendered_html: String,
+}
+```
+
+Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`, `Post::CREATED_AT`.
+
+## API overview
+
+| On the model (`User::…`) | |
+|---|---|
+| `query()`, `filter(expr)`, `order_by(col)` | start a `SELECT` |
+| `find(db, id)` / `find_or_fail(db, id)` / `find_many(db, ids)` | by primary key |
+| `all(db)`, `count(db)` | whole table |
+| `create().set(col, v)….exec(db)` | insert column by column |
+| `insert_all(db, &records)` | multi-row insert, returns stored rows |
+| `update_all().filter(..).set(..).exec(db)` | bulk update |
+
+| On a record (`user.…`) | |
+|---|---|
+| `insert(db)` | insert (skipping `generated` columns), returns stored row |
+| `save(db)` | update by primary key, returns stored row |
+| `upsert(db)` | `INSERT … ON CONFLICT (pk) DO UPDATE` |
+| `delete(db)` | delete by primary key |
+| `reload(db)` | re-read from the database |
+
+| On a query (`Select`) | |
+|---|---|
+| `filter`, `filter_opt`, `filter_if` | `WHERE` (combined with `AND`) |
+| `order_by`, `limit`, `offset`, `for_update`, `for_share` | |
+| `all`, `first`, `one`, `count`, `exists` | run it |
+| `paginate(db, page, per_page)` | `Page<T>` with `total`, `total_pages()`, `has_next()` — one round trip |
+| `update().set(..)/increment(..)/set_raw(..)` | turn into a bulk `UPDATE` |
+| `delete(db)` | bulk `DELETE` |
+| `to_sql()` | inspect the generated SQL and parameters |
+
+Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in between is_null is_not_null asc desc`.
+Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, or `Expr::raw("lower(email) = ?", [v])`.
+
+### Transactions
+
+```rust
+let user = db.transaction(|tx| Box::pin(async move {
+    let user = new_user.insert(&mut *tx).await?;
+    Profile::create().set(Profile::USER_ID, user.id).exec(&mut *tx).await?;
+    Ok::<_, rok_db::Error>(user)
+})).await?;                              // commits on Ok, rolls back on Err
+
+let mut tx = db.begin().await?;          // or manage it yourself
+User::filter(User::ID.eq(1)).for_update().one(&mut *tx).await?;
+tx.commit().await?;
+```
+
+### Raw SQL
+
+```rust
+let users: Vec<User> = rok_db::raw("SELECT * FROM users WHERE age > ? AND email ILIKE ?")
+    .bind(18)
+    .bind("%@example.com")
+    .fetch_all(&db)
+    .await?;
+
+let total: i64 = rok_db::raw("SELECT COUNT(*) FROM users").scalar(&db).await?;
+```
+
+### Errors
+
+`rok_db::Error` has helpers for the common cases: `is_not_found()`, `is_unique_violation()`, `is_foreign_key_violation()` and `constraint()`.
+
+## Crates
+
+| crate | |
+|---|---|
+| `rok-db` | the crate to depend on: re-exports everything plus the derive |
+| `rok-db-core` | runtime: `Db`, `Model`, query builders, `Value` |
+| `rok-db-macros` | `#[derive(Model)]` |
+
+## Development
+
+```sh
+cargo test --workspace --all-features          # SQL-generation tests run everywhere
+DATABASE_URL=postgres://postgres:postgres@localhost/rok_db_test \
+  cargo test --workspace --all-features        # plus end-to-end tests against Postgres
+cargo run -p rok-db --example blog             # needs DATABASE_URL
+```
+
+Database tests use per-connection `TEMP` tables, so they never touch existing data.
+
+## License
+
+MIT OR Apache-2.0

@@ -1,8 +1,11 @@
 [package]
-name = "orm-macros"
+name = "rok-db-macros"
+description = "Derive macros for rok-db"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [lib]
 proc-macro = true
