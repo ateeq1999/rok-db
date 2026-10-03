@@ -53,6 +53,39 @@ impl Db {
         }
     }
 
+    /// A handle to the same pool and settings that never uses read replicas,
+    /// for reads that must see the latest writes.
+    pub fn primary(&self) -> Db {
+        let mut ctx = (*self.ctx).clone();
+        ctx.replicas.clear();
+        Db {
+            pool: self.pool.clone(),
+            ctx: Arc::new(ctx),
+        }
+    }
+
+    /// Number of configured read replicas.
+    pub fn replica_count(&self) -> usize {
+        self.ctx.replicas.len()
+    }
+
+    /// A snapshot of the connection pool's state.
+    pub fn stats(&self) -> PoolStats {
+        PoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle(),
+            max_connections: self.pool.options().get_max_connections(),
+        }
+    }
+
+    /// Report [`stats`](Self::stats) as `rok_db_pool_connections` gauges
+    /// (feature `metrics`). Call it periodically, e.g. from a background
+    /// task or before each metrics scrape.
+    #[cfg(feature = "metrics")]
+    pub fn record_pool_metrics(&self) {
+        crate::metrics::pool(self.stats());
+    }
+
     /// The query cache, if enabled with [`DbBuilder::query_cache`].
     pub fn cache(&self) -> Option<&QueryCache> {
         self.ctx.cache.as_ref()
@@ -71,11 +104,17 @@ impl Db {
     /// Start a transaction. It is rolled back on drop unless
     /// [`Tx::commit`] is called.
     pub async fn begin(&self) -> Result<Tx> {
-        Ok(Tx {
+        #[cfg_attr(not(feature = "json"), allow(unused_mut))]
+        let mut tx = Tx {
             inner: self.pool.begin().await?,
             ctx: Some(self.ctx.clone()),
             touched: Mutex::default(),
-        })
+        };
+        #[cfg(feature = "json")]
+        if let Some(actor) = crate::audit::current_actor() {
+            tx.set_actor(&actor).await?;
+        }
+        Ok(tx)
     }
 
     /// Run `f` inside a transaction, committing if it returns `Ok` and
@@ -203,9 +242,12 @@ impl Db {
         Ok(())
     }
 
-    /// Close every connection in the pool.
+    /// Close every connection in the pool and its replicas.
     pub async fn close(&self) {
         self.pool.close().await;
+        for replica in &self.ctx.replicas {
+            replica.close().await;
+        }
     }
 }
 
@@ -223,6 +265,17 @@ impl fmt::Debug for Db {
             .field("cache", &self.ctx.cache)
             .finish()
     }
+}
+
+/// Connection pool statistics, from [`Db::stats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStats {
+    /// Open connections (idle and in use).
+    pub size: u32,
+    /// Idle connections.
+    pub idle: usize,
+    /// Configured maximum.
+    pub max_connections: u32,
 }
 
 /// Transaction isolation level, see [`TxOptions::isolation`].
@@ -337,6 +390,8 @@ impl Retryable for Error {
 pub struct DbBuilder {
     options: PgPoolOptions,
     ctx: Context,
+    replica_urls: Vec<String>,
+    shared_invalidation: bool,
 }
 
 impl DbBuilder {
@@ -354,6 +409,40 @@ impl DbBuilder {
         self
     }
 
+    /// Add a read replica. Reads made through `&Db` by the query builder
+    /// (`all`, `first`, `count`, `paginate`, relations, …) are spread across
+    /// replicas round-robin; writes, row locks (`for_update`), transactions
+    /// and raw SQL stay on the primary. A read that fails because a replica
+    /// is unreachable is retried on the primary.
+    ///
+    /// Replicas lag behind the primary: use
+    /// [`Select::on_primary`](crate::Select::on_primary) or
+    /// [`Db::primary`] where a read must see the latest write.
+    pub fn read_replica(mut self, url: impl Into<String>) -> Self {
+        self.replica_urls.push(url.into());
+        self
+    }
+
+    /// Add an existing pool as a read replica (see [`read_replica`](Self::read_replica)).
+    pub fn replica_pool(mut self, pool: PgPool) -> Self {
+        self.ctx.replicas.push(pool);
+        self
+    }
+
+    /// Keep the query caches of every process using this database coherent:
+    /// invalidations are broadcast with PostgreSQL `NOTIFY` and applied by
+    /// all instances that enabled this (needs [`query_cache`](Self::query_cache)
+    /// and a Tokio runtime). A background task holds one extra connection.
+    ///
+    /// Invalidation is asynchronous: other instances drop stale entries a few
+    /// milliseconds after the writing transaction's statement. After a lost
+    /// connection the local cache is cleared, since messages may have been
+    /// missed.
+    pub fn shared_cache_invalidation(mut self) -> Self {
+        self.shared_invalidation = true;
+        self
+    }
+
     /// Log queries slower than `threshold` at `WARN` level on the
     /// `rok_db::slow_query` tracing target (default 1s, `Duration::ZERO`
     /// disables it).
@@ -363,6 +452,14 @@ impl DbBuilder {
     }
 
     fn build(self, pool: PgPool) -> Db {
+        if self.shared_invalidation {
+            match &self.ctx.cache {
+                Some(cache) => crate::cache_sync::start(pool.clone(), cache),
+                None => {
+                    tracing::warn!(target: "rok_db::cache", "shared_cache_invalidation() without query_cache(); ignored")
+                }
+            }
+        }
         Db {
             pool,
             ctx: Arc::new(self.ctx),
@@ -402,6 +499,15 @@ impl DbBuilder {
     /// Connect to `url` and return the pool.
     pub async fn connect(self, url: &str) -> Result<Db> {
         let pool = self.options.clone().connect(url).await?;
+        self.finish(pool).await
+    }
+
+    /// Connect the configured replica URLs, then build the handle.
+    async fn finish(mut self, pool: PgPool) -> Result<Db> {
+        for url in std::mem::take(&mut self.replica_urls) {
+            let replica = self.options.clone().connect(&url).await?;
+            self.ctx.replicas.push(replica);
+        }
         Ok(self.build(pool))
     }
 
@@ -414,7 +520,8 @@ impl DbBuilder {
     }
 
     /// Wrap an existing sqlx pool, applying this builder's rok-db settings
-    /// (pool options are ignored).
+    /// (pool options and replica URLs are ignored; use
+    /// [`replica_pool`](Self::replica_pool) for replicas).
     pub fn build_with_pool(self, pool: PgPool) -> Db {
         self.build(pool)
     }
@@ -422,13 +529,18 @@ impl DbBuilder {
     /// Connect with fully custom connect options.
     pub async fn connect_with(self, options: PgConnectOptions) -> Result<Db> {
         let pool = self.options.clone().connect_with(options).await?;
-        Ok(self.build(pool))
+        self.finish(pool).await
     }
 
     /// Create the pool without opening any connection until first use.
     pub fn connect_lazy(self, url: &str) -> Result<Db> {
         let pool = self.options.clone().connect_lazy(url)?;
-        Ok(self.build(pool))
+        let mut builder = self;
+        for url in std::mem::take(&mut builder.replica_urls) {
+            let replica = builder.options.clone().connect_lazy(&url)?;
+            builder.ctx.replicas.push(replica);
+        }
+        Ok(builder.build(pool))
     }
 }
 
@@ -462,9 +574,30 @@ impl Tx {
         Ok(self.inner.rollback().await?)
     }
 
+    /// Record `actor` as the author of this transaction's changes in the
+    /// audit log (`SET LOCAL rok.actor`, see [`audit`](crate::audit)).
+    pub async fn set_actor(&mut self, actor: &str) -> Result<()> {
+        sqlx::query("SELECT set_config('rok.actor', $1, true)")
+            .bind(actor)
+            .execute(&mut *self.inner)
+            .await?;
+        Ok(())
+    }
+
     /// The underlying sqlx transaction.
     pub fn inner(&mut self) -> &mut sqlx::Transaction<'static, Postgres> {
         &mut self.inner
+    }
+
+    /// Record a write to `table` made outside the executor path (e.g. COPY).
+    pub(crate) fn note_write(&self, table: &'static str) {
+        let mut touched = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        if !touched.contains(&table) {
+            touched.push(table);
+        }
+        if let Some(cache) = self.ctx.as_ref().and_then(|c| c.cache.as_ref()) {
+            cache.invalidate(table);
+        }
     }
 }
 
@@ -501,6 +634,10 @@ impl fmt::Debug for Tx {
 impl<'c> crate::Executor<'c> for &'c Db {
     fn __context(&self) -> Option<Arc<Context>> {
         Some(self.ctx.clone())
+    }
+
+    fn __replica(&self) -> Option<PgPool> {
+        self.ctx.replica()
     }
 }
 

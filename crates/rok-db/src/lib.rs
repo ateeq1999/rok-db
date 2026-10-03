@@ -88,6 +88,22 @@
 //! - **Scopes**: `#[rok(default_scope = …)]`, [`Select::scope`],
 //!   [`Select::unscoped`].
 //! - **Retrying transactions**: [`Db::transaction_with`] with [`TxOptions`].
+//! - **Change tracking**: [`Model::track`] / [`Tracked`] and
+//!   [`Model::save_only`].
+//! - **Bulk loading**: [`Model::copy_in`] with binary `COPY`.
+//! - **Web & metrics**: the [`web`] module (`serde`, `axum` features) and
+//!   [`metrics`] (`metrics` feature).
+//! - **PostgreSQL types**: arrays (`Vec<T>` fields, [`Column::array_has`],
+//!   [`Column::eq_any`]), JSONB ([`Column::json_text`],
+//!   [`Column::json_has_key`]) and full-text search ([`Column::search`],
+//!   [`Column::search_rank`]).
+//! - **Read replicas**: [`DbBuilder::read_replica`], [`Select::on_primary`],
+//!   [`Db::primary`].
+//! - **LISTEN/NOTIFY**: [`Db::listen`], [`Db::notify`] and model change
+//!   feeds ([`Model::changes`], see [`notify`]).
+//! - **Multi-instance caching**: [`DbBuilder::shared_cache_invalidation`].
+//! - **Multi-tenancy**: `#[rok(tenant)]` and [`tenant::with_tenant`].
+//! - **Audit log** (feature `json`): the [`audit`] module.
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`
@@ -116,7 +132,10 @@
 //! | `json`    | `serde_json::Value` and `sqlx::types::Json<T>` columns |
 //! | `migrate` | [`Db::migrate`] for running sqlx migrations          |
 //! | `testing` | [`macro@test`] and [`testing::TestDb`]: a temporary database per test |
-//! | `full`    | all of the above                                     |
+//! | `serde`   | `Serialize` for pages, cursors and validation errors |
+//! | `axum`    | [`Error`] implements axum's `IntoResponse` (implies `serde`) |
+//! | `metrics` | query, cache and pool metrics, see [`metrics`] |
+//! | `full`    | all of the above except `testing`                    |
 
 pub use rok_db_core::*;
 

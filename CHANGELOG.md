@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shared cache invalidation: `DbBuilder::shared_cache_invalidation`
+  broadcasts query-cache invalidations between processes over
+  `LISTEN`/`NOTIFY` (clearing the local cache after reconnects).
+- Multi-tenancy: `#[rok(tenant)]`, `tenant::with_tenant` / `tenant::current`
+  (task-local), fail-closed filtering of queries, bulk writes and record
+  operations, tenant stamping of inserts/upserts/COPY, protection against
+  cross-tenant upserts and moves, and `Select::all_tenants` /
+  `Update::all_tenants`.
+- Audit log (feature `json`): `audit::install`, `audit::enable` (with
+  excluded columns), `audit::disable`, `audit::history`, the `AuditEntry`
+  model, `audit::with_actor` and `Tx::set_actor`.
+
+- PostgreSQL arrays: `Vec<T>` column values (text, bool, integers,
+  floats, and uuid/date types with their features) and the operators
+  `array_has`, `array_contains`, `array_overlaps` and `eq_any`.
+- JSONB: `json_has_key`, `json_has_any_key`, `json_has_all_keys`,
+  `json_contains` (feature `json`), `json_text` and `json_path_text`.
+- Full-text search: `search`, `search_in` (explicit configuration),
+  `ts_matches` and `search_rank`; `Projection::asc`/`desc` to order by
+  expressions, including in offset pagination.
+- Read replicas: `DbBuilder::read_replica` / `replica_pool`, round-robin
+  routing of query-builder reads with fallback to the primary,
+  `Select::on_primary`, `Raw::on_replica`, `Db::primary` and
+  `Db::replica_count`.
+- LISTEN/NOTIFY: `Db::listen` (`Listener`), `Db::notify`, and model change
+  feeds with `Model::install_change_notifications`, `Model::changes`
+  (`ChangeStream`, `Change`, `ChangeOp`) and
+  `Model::uninstall_change_notifications`.
+
+- Change tracking: `Model::track` returns a `Tracked<M>` whose `save` writes
+  only changed columns (or nothing); `changes`, `is_dirty`, `is_changed`,
+  `mark_clean`. `Model::save_only` updates selected columns.
+- Bulk loading: `Model::copy_in` streams records with binary
+  `COPY … FROM STDIN` through a pool, transaction or connection
+  (`CopyTarget`), validating first and invalidating the query cache.
+- Web integration: feature `serde` (`Serialize` for `Page`, `CursorPage`,
+  `ValidationErrors`; `Cursor` as a string) and feature `axum`
+  (`Error: IntoResponse` with JSON bodies and `Error::http_status`).
+- Metrics (feature `metrics`): query counts, durations, rows, slow queries,
+  cache hits/misses and pool gauges through the `metrics` crate;
+  `Db::stats` / `PoolStats` and `Db::record_pool_metrics`.
+
 - Custom column types: `#[derive(DbEnum)]` (TEXT or native PostgreSQL
   enums, with `rename`/`rename_all`), `#[derive(DbNewtype)]`,
   `impl_value!`, `Value::Custom` / `Value::custom` and the `CustomType`
@@ -84,8 +126,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   governance, security policy, Code of Conduct, RFC process, issue and pull
   request templates, CI, Dependabot and cargo-deny configuration.
 
+### Fixed
+
+- `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
+  awaited, not when the future is created, so scopes such as
+  `with_tenant` apply to futures created outside them.
+
 ### Changed
 
+- `Order` can target expressions; keyset pagination rejects expression
+  orders with `Error::InvalidQuery`.
 - `Executor` is now a rok-db trait (implemented for `&Db`, `&mut Tx`,
   `&PgPool`, `&mut PgConnection` and `&mut PgListener`) so executors can
   carry pool settings such as the query cache.

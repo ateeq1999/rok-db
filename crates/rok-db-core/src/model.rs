@@ -99,6 +99,8 @@ pub trait Model:
     /// Soft-delete column: `delete` sets it to `now()` and queries skip rows
     /// where it isn't `NULL`.
     const DELETED_AT_COLUMN: Option<&'static str> = None;
+    /// Tenant column: see [`tenant`](crate::tenant).
+    const TENANT_COLUMN: Option<&'static str> = None;
     /// Optimistic-locking column: incremented on every update, and `save`/
     /// `delete` fail with [`Error::Conflict`] if it changed since loading.
     const VERSION_COLUMN: Option<&'static str> = None;
@@ -258,6 +260,45 @@ pub trait Model:
         }
     }
 
+    /// Track changes to this record so [`Tracked::save`](crate::Tracked::save)
+    /// writes only modified columns.
+    fn track(self) -> crate::Tracked<Self> {
+        crate::Tracked::new(self)
+    }
+
+    /// Install (or replace) an `AFTER INSERT OR UPDATE OR DELETE` trigger
+    /// that announces every row change of this table, for
+    /// [`changes`](Model::changes). Run it once, e.g. from a migration or at
+    /// startup (PostgreSQL 11+).
+    fn install_change_notifications(db: &crate::Db) -> impl Future<Output = Result<()>> + Send {
+        let sql = crate::notify::install_sql::<Self>();
+        async move {
+            db.execute(&sql?).await?;
+            Ok(())
+        }
+    }
+
+    /// Remove the trigger installed by
+    /// [`install_change_notifications`](Model::install_change_notifications).
+    fn uninstall_change_notifications(db: &crate::Db) -> impl Future<Output = Result<()>> + Send {
+        let sql = crate::notify::uninstall_sql::<Self>();
+        async move {
+            db.execute(&sql).await?;
+            Ok(())
+        }
+    }
+
+    /// Subscribe to row changes of this table (see
+    /// [`install_change_notifications`](Model::install_change_notifications)).
+    fn changes(
+        db: &crate::Db,
+    ) -> impl Future<Output = Result<crate::notify::ChangeStream<Self>>> + Send {
+        async move {
+            let listener = db.listen(&[&crate::notify::channel::<Self>()]).await?;
+            Ok(crate::notify::ChangeStream::new(listener))
+        }
+    }
+
     /// `true` if this record has been soft-deleted.
     fn is_trashed(&self) -> bool {
         Self::DELETED_AT_COLUMN
@@ -272,11 +313,11 @@ pub trait Model:
     where
         E: Executor<'e>,
     {
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
         async move {
-            pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            // Rendered when awaited, so tenant scopes apply.
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -295,6 +336,30 @@ pub trait Model:
         Self::insert_many(records).exec(executor)
     }
 
+    /// Bulk-load `records` with PostgreSQL's binary `COPY`, typically 5–20×
+    /// faster than `INSERT` for large batches. Returns the number of rows
+    /// written.
+    ///
+    /// ```ignore
+    /// User::copy_in(&db, &users).await?;          // borrows a pooled connection
+    /// User::copy_in(&mut *tx, &users).await?;     // inside a transaction
+    /// ```
+    ///
+    /// Records are validated and passed to `before_insert` first;
+    /// `after_insert` is not called and nothing is returned, because `COPY`
+    /// doesn't return rows. Generated columns are skipped; every other value
+    /// (timestamps and `version` included) is written as-is. Binary `COPY`
+    /// needs each field's Rust type to match its column type exactly (e.g.
+    /// `i64` for `BIGINT`). The table's cached query results are invalidated
+    /// (except when copying through a plain `PgConnection`).
+    fn copy_in<'a>(
+        target: impl Into<crate::copy::CopyTarget<'a>>,
+        records: &[Self],
+    ) -> impl Future<Output = Result<u64>> + Send {
+        let target = target.into();
+        async move { crate::copy::copy_in(target, records).await }
+    }
+
     /// `INSERT` this record, or update every column if its primary key
     /// already exists (`ON CONFLICT (pk) DO UPDATE`). The primary key is
     /// always written, even when it is a generated column.
@@ -306,11 +371,10 @@ pub trait Model:
             target: ConflictTarget::Columns(vec![Self::PRIMARY_KEY]),
             action: ConflictAction::UpdateAll,
         };
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
         async move {
-            pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -340,11 +404,10 @@ pub trait Model:
             target: ConflictTarget::Columns(columns.into_iter().map(|c| c.name()).collect()),
             action: ConflictAction::UpdateAll,
         };
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
         async move {
-            pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -360,6 +423,27 @@ pub trait Model:
     where
         E: Executor<'e>,
     {
+        self.save_only(executor, None)
+    }
+
+    /// Like [`save`](Model::save), but only write `columns` (managed columns
+    /// such as `updated_at` and `version` are still maintained). Passing
+    /// `None` writes every column.
+    ///
+    /// ```ignore
+    /// user.save_only(&db, Some(vec![User::EMAIL])).await?;
+    /// ```
+    ///
+    /// [`Tracked`](crate::Tracked) uses this to write only changed fields.
+    fn save_only<'e, E>(
+        &self,
+        executor: E,
+        columns: Option<Vec<Column<Self>>>,
+    ) -> impl Future<Output = Result<Self>> + Send
+    where
+        E: Executor<'e>,
+    {
+        let only: Option<Vec<&'static str>> = columns.map(|c| c.iter().map(|c| c.name()).collect());
         let pre = self
             .validate()
             .map_err(Error::Validation)
@@ -367,10 +451,14 @@ pub trait Model:
         let pk = self.primary_key();
         let key = pk.to_string();
         let managed = |c: &str| {
-            c == Self::PRIMARY_KEY || is_timestamp::<Self>(c) || Self::VERSION_COLUMN == Some(c)
+            c == Self::PRIMARY_KEY
+                || is_timestamp::<Self>(c)
+                || Self::VERSION_COLUMN == Some(c)
+                || Self::TENANT_COLUMN == Some(c)
         };
         let sets: Vec<_> = writable::<Self>(self.values())
             .filter(|(c, _)| !managed(c))
+            .filter(|(c, _)| only.as_ref().is_none_or(|only| only.contains(c)))
             .collect();
         let mut update = Self::update_all()
             .with_trashed()
@@ -457,23 +545,24 @@ pub trait Model:
         if let Some((column, current)) = version.clone() {
             select = select.filter(Column::new(column).eq(current));
         }
-        let mut sql = Sql::new();
-        match soft {
-            Some(deleted_at) => select
-                .update()
-                .set_raw(Column::new(deleted_at), "now()", [] as [Value; 0])
-                .write_into(&mut sql),
-            None => {
-                let delete = if force {
-                    select.force_delete_sql()
-                } else {
-                    select.delete_sql()
-                };
-                sql = delete;
-            }
-        }
         async move {
             pre?;
+            // Rendered when awaited, so tenant scopes apply.
+            let mut sql = Sql::new();
+            match soft {
+                Some(deleted_at) => select
+                    .update()
+                    .set_raw(Column::new(deleted_at), "now()", [] as [Value; 0])
+                    .write_into(&mut sql),
+                None => {
+                    let delete = if force {
+                        select.force_delete_sql()
+                    } else {
+                        select.delete_sql()
+                    };
+                    sql = delete;
+                }
+            }
             if version.is_some() {
                 checked_write::<Self, _>(executor, sql, pk, exists).await?;
             } else if exec::execute(executor, &sql, &[Self::TABLE]).await? == 0 {
@@ -540,7 +629,7 @@ async fn checked_write<'e, M: Model, E: Executor<'e>>(
     exists.write_exists_body(&mut sql);
     sql.push(r#") AS "__rok_exists", "w".* FROM (SELECT 1) AS "__rok_d" LEFT JOIN "__rok_w" AS "w" ON TRUE"#);
 
-    let rows = exec::fetch_rows(executor, &sql, &[M::TABLE]).await?;
+    let rows = exec::fetch_rows(executor, &sql, &[M::TABLE], false).await?;
     let row = rows
         .first()
         .ok_or_else(|| Error::not_found::<M>(Some(key.clone())))?;
@@ -594,12 +683,15 @@ pub(crate) fn insert_sql<M: Model>(
                 sql.push_ident(c);
             })
             .push(") VALUES ");
+        let tenant = M::TENANT_COLUMN.zip(crate::tenant::current());
         sql.push_list(records, ", ", |sql, record| {
             let values = record.values().into_iter().filter(|(c, _)| include(c));
             sql.push("(")
                 .push_list(values, ", ", |sql, (c, v)| {
                     if is_timestamp::<M>(c) {
                         sql.push("now()");
+                    } else if let Some((_, current)) = tenant.as_ref().filter(|(t, _)| *t == c) {
+                        sql.bind(current.clone());
                     } else {
                         sql.bind(v);
                     }
@@ -612,6 +704,14 @@ pub(crate) fn insert_sql<M: Model>(
     }
     push_returning::<M>(&mut sql);
     Ok(sql)
+}
+
+/// The tenant value to write for `column` of `M`, if it is the tenant column
+/// and a tenant scope is active.
+pub(crate) fn tenant_override<M: Model>(column: &str) -> Option<Value> {
+    M::TENANT_COLUMN
+        .filter(|c| *c == column)
+        .and_then(|_| crate::tenant::current())
 }
 
 pub(crate) fn push_columns<M: Model>(sql: &mut Sql) {

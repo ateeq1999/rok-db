@@ -30,7 +30,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `json`    | `serde_json::Value` and `Json<T>` columns                 |
 | `migrate` | `Db::migrate("./migrations")`                            |
 | `testing` | `#[rok_db::test]`: a temporary database per test        |
-| `full`    | all of the above                                         |
+| `serde`   | `Serialize` for `Page`, `CursorPage`, `Cursor`, `ValidationErrors` |
+| `axum`    | `rok_db::Error` as an HTTP response (implies `serde`)    |
+| `metrics` | query, cache and pool metrics via the `metrics` crate    |
+| `full`    | all of the above except `testing`                        |
 
 ## Quick start
 
@@ -110,6 +113,7 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `skip` | field | not a column |
 | `created_at` / `updated_at` / `deleted_at` | field | managed column with a custom name |
 | `version` | field | optimistic-locking counter |
+| `tenant` | field | tenant column for row-level multi-tenancy |
 | `validate(length(..), range(..), email, non_empty, custom = f)` | field | validation rules |
 | `belongs_to = User` | field | `user_id` → `Post::USER`, `post.user()` (or `belongs_to(author = User)`) |
 
@@ -128,6 +132,9 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 |---|---|
 | `insert(db)` | insert (skipping `generated` columns), returns stored row |
 | `save(db)` | update by primary key, returns stored row |
+| `save_only(db, Some(vec![User::EMAIL]))` | update only some columns |
+| `track()` | `Tracked<M>`: save only what changed |
+| `Model::copy_in(db, &records)` | bulk load with binary `COPY` |
 | `upsert(db)` | `INSERT … ON CONFLICT (pk) DO UPDATE` |
 | `upsert_on(db, [User::EMAIL])` | upsert on a unique column |
 | `force_delete(db)`, `restore(db)`, `is_trashed()` | soft deletes |
@@ -258,6 +265,11 @@ db.cache().unwrap().stats();        // hits, misses, entries
 - Writes rok-db can't see (other services, raw SQL, cascades and triggers on other tables) need `raw(..).invalidates("users")`,
   `cache.invalidate("users")`, or a short TTL.
 - Without a configured cache (or with a plain sqlx pool), `memoize` simply runs the query.
+
+Running several app servers? Add `.shared_cache_invalidation()` to the builder: every instance
+broadcasts its invalidations over PostgreSQL `NOTIFY` and drops stale entries from the others,
+with no extra infrastructure. (If a listener reconnects, its local cache is cleared, since
+messages may have been missed.)
 
 ### Query logging
 
@@ -432,6 +444,163 @@ Article::all(&db).await?;                                // only published
 Article::query().scope(popular).all(&db).await?;         // named scope
 Article::query().unscoped().count(&db).await?;           // everything
 ```
+
+### Change tracking
+
+```rust
+let mut user = User::find_or_fail(&db, 1).await?.track();
+user.name = "Ann".into();                  // Tracked<User> derefs to User
+user.changes();                            // [("name", "ann", "Ann")]
+user.save(&db).await?;                     // UPDATE users SET name = $1 … — only changed columns
+user.save(&db).await?;                     // nothing changed: no query
+```
+
+Writing only changed columns avoids clobbering concurrent edits to other columns.
+
+### Bulk loading with COPY
+
+```rust
+let rows: u64 = Event::copy_in(&db, &events).await?;      // or (&mut tx, …)
+```
+
+Uses PostgreSQL's binary `COPY`, typically 5–20× faster than `INSERT` for large batches. Records
+are validated first; generated columns are skipped; field types must match column types
+exactly (`i64` ↔ `BIGINT`). Nothing is returned (no `after_insert` hooks).
+
+### Web integration (axum)
+
+With the `axum` feature, rok-db errors are HTTP responses, so handlers can just use `?`:
+
+```rust
+async fn show(State(db): State<Db>, Path(id): Path<i64>) -> rok_db::Result<Json<User>> {
+    Ok(Json(User::find_or_fail(&db, id).await?))         // 404 {"error":"not_found",…}
+}
+
+async fn list(State(db): State<Db>, Query(q): Query<ListQuery>) -> rok_db::Result<Json<CursorPage<User>>> {
+    // `ListQuery { after: Option<Cursor> }` — cursors (de)serialize as strings
+    Ok(Json(User::order_by(User::ID).cursor_paginate(&db, q.after.as_ref(), 50).await?))
+}
+```
+
+| error | status |
+|---|---|
+| not found | 404 |
+| validation (with `fields`), hook rejection, foreign-key violation | 422 |
+| optimistic-lock conflict, unique violation | 409 |
+| invalid cursor | 400 |
+| anything else | 500 (details logged, never returned) |
+
+### Metrics
+
+With the `metrics` feature, install any [`metrics`](https://docs.rs/metrics) recorder (Prometheus,
+StatsD, OpenTelemetry…) and rok-db reports `rok_db_queries_total{kind,outcome}`,
+`rok_db_query_duration_seconds{kind}`, `rok_db_slow_queries_total`, `rok_db_rows_total`,
+`rok_db_cache_requests_total{result}` and, via `db.record_pool_metrics()`,
+`rok_db_pool_connections{state}`. `db.stats()` gives a pool snapshot without the feature.
+
+### PostgreSQL arrays, JSONB and full-text search
+
+```rust
+#[derive(Model)]
+struct Doc { id: i64, body: String, tags: Vec<String>, prefs: serde_json::Value }
+
+Doc::filter(Doc::TAGS.array_has("rust"));                         // $1 = ANY(tags)
+Doc::filter(Doc::TAGS.array_overlaps(vec!["db".to_string()]));    // tags && $1
+Doc::filter(Doc::ID.eq_any(ids));                                  // id = ANY($1): one parameter for any number of ids
+
+Doc::filter(Doc::PREFS.json_has_key("theme"));                     // prefs ? $1
+Doc::filter(Doc::PREFS.json_contains(json!({"theme": "dark"})));   // prefs @> $1   (feature `json`)
+Doc::filter(Doc::PREFS.json_text("lang").eq("en"));                // prefs ->> 'lang' = $1
+Doc::filter(Doc::PREFS.json_path_text(["notify", "email"]).eq("true"));
+
+Doc::filter(Doc::BODY.search_in("english", "\"query builder\" -java"))   // websearch syntax
+    .order_by(Doc::BODY.search_rank("query builder").desc())               // order by an expression
+    .paginate(&db, 1, 20)
+    .await?;
+```
+
+`Vec<T>` fields map to PostgreSQL arrays for `String`, `bool`, integers, floats and (with the
+features) `Uuid` and dates.
+
+### Read replicas
+
+```rust
+let db = Db::builder()
+    .read_replica("postgres://replica-1/app")
+    .read_replica("postgres://replica-2/app")
+    .connect("postgres://primary/app")
+    .await?;
+
+User::all(&db).await?;                          // round-robin over replicas
+User::query().on_primary().all(&db).await?;     // read your own writes
+User::all(&db.primary()).await?;                // a handle that never uses replicas
+```
+
+Only the query builder's plain reads use replicas. Writes, `for_update`/`for_share`, transactions and
+raw SQL (unless `.on_replica()`) go to the primary, and a read whose replica is unreachable is retried
+on the primary.
+
+### Change notifications (LISTEN/NOTIFY)
+
+```rust
+let mut listener = db.listen(&["jobs"]).await?;
+db.notify("jobs", "resize:42").await?;
+let n = listener.recv().await?;                 // n.channel, n.payload
+
+User::install_change_notifications(&db).await?; // once: an AFTER trigger on `users`
+let mut changes = User::changes(&db).await?;
+while let Ok(change) = changes.recv().await {
+    match change.op {
+        ChangeOp::Insert | ChangeOp::Update => { let user = change.fetch(&db).await?; }
+        ChangeOp::Delete => { /* change.key is the primary key, as text */ }
+    }
+}
+```
+
+Notifications arrive on commit, at most once, and only to connected listeners: great for cache
+busting, websockets and waking workers, not a durable event log.
+
+### Multi-tenancy
+
+```rust
+#[derive(Model)]
+struct Invoice { id: i64, #[rok(tenant)] org_id: i64, total: i64 }
+
+rok_db::tenant::with_tenant(org.id, async {
+    Invoice::all(&db).await?;                 // … WHERE org_id = $1
+    invoice.insert(&db).await?;               // org_id is always the current tenant
+    Ok::<_, rok_db::Error>(())
+}).await?;
+
+Invoice::all(&db).await?;                     // outside a scope: matches nothing (fails closed)
+Invoice::query().all_tenants().all(&db).await?; // explicit opt-out for admin jobs
+```
+
+Every query, count, bulk update/delete and record operation is restricted to the current tenant;
+upserts can't take over another tenant's row and saves can't move a row to another tenant. The
+scope is task-local (`tokio::spawn`ed tasks need their own `with_tenant`), and raw SQL is not
+filtered.
+
+### Audit log
+
+```rust
+use rok_db::audit;
+
+audit::install(&db).await?;                                   // table + trigger function, once
+audit::enable::<User>(&db, &[User::PASSWORD_HASH]).await?;    // audit `users`, minus secrets
+
+audit::with_actor("user:42", async {                          // or tx.set_actor("user:42")
+    db.transaction(|tx| Box::pin(async move { user.save(&mut *tx).await })).await
+}).await?;
+
+for entry in audit::history::<User>(&db, user.id).await? {
+    println!("{} by {:?}: {:?}", entry.op, entry.actor, entry.changed);
+}
+```
+
+Trigger-based (feature `json`): it records every insert, update and delete of the table, including bulk
+and raw SQL, with old/new rows as JSONB and the changed columns. No-op updates are skipped.
+`AuditEntry` is a regular model you can query.
 
 ### Retrying transactions
 

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use sqlx::Postgres;
@@ -15,6 +16,19 @@ pub(crate) const DEFAULT_SLOW_QUERY: Duration = Duration::from_secs(1);
 pub struct Context {
     pub(crate) cache: Option<QueryCache>,
     pub(crate) slow_query: Duration,
+    pub(crate) replicas: Vec<PgPool>,
+    pub(crate) next_replica: Arc<AtomicUsize>,
+}
+
+impl Context {
+    /// The next replica in round-robin order, if any.
+    pub(crate) fn replica(&self) -> Option<PgPool> {
+        if self.replicas.is_empty() {
+            return None;
+        }
+        let i = self.next_replica.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
+        Some(self.replicas[i].clone())
+    }
 }
 
 impl Default for Context {
@@ -22,6 +36,8 @@ impl Default for Context {
         Self {
             cache: None,
             slow_query: DEFAULT_SLOW_QUERY,
+            replicas: Vec::new(),
+            next_replica: Arc::default(),
         }
     }
 }
@@ -36,6 +52,12 @@ impl Default for Context {
 pub trait Executor<'c>: sqlx::Executor<'c, Database = Postgres> {
     #[doc(hidden)]
     fn __context(&self) -> Option<Arc<Context>> {
+        None
+    }
+
+    /// A read replica to run a read-only query on, if configured.
+    #[doc(hidden)]
+    fn __replica(&self) -> Option<PgPool> {
         None
     }
 
