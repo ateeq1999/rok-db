@@ -1,5 +1,9 @@
 # rok-db
 
+[![CI](https://github.com/ateeq1999/rok-db/actions/workflows/ci.yml/badge.svg)](https://github.com/ateeq1999/rok-db/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-orange.svg)](CONTRIBUTING.md#compatibility-policy)
+
 An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github.com/launchbadge/sqlx).
 
 - **One derive** — `#[derive(Model)]` gives you CRUD, a `FromRow` impl and typed column constants.
@@ -156,6 +160,16 @@ let total: i64 = rok_db::raw("SELECT COUNT(*) FROM users").scalar(&db).await?;
 | `rok-db-core` | runtime: `Db`, `Model`, query builders, `Value` |
 | `rok-db-macros` | `#[derive(Model)]` |
 
+## Contributing
+
+Contributions are welcome! Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
+setup, the change protocol and commit conventions. Larger changes go through
+the [RFC process](docs/rfcs/README.md); see [GOVERNANCE.md](GOVERNANCE.md) for
+how decisions are made. Please report security issues privately as described
+in [SECURITY.md](SECURITY.md). Everyone is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Notable changes are listed in the
+[changelog](CHANGELOG.md).
+
 ## Development
 
 ```sh
@@ -169,4 +183,13 @@ Database tests use per-connection `TEMP` tables, so they never touch existing da
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

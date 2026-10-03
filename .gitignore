@@ -1,3 +1,12 @@
 /target
+
+# Local notes; project documents are listed explicitly below.
 *.md
-!README.md
+!/README.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+!/CODE_OF_CONDUCT.md
+!/GOVERNANCE.md
+!/SECURITY.md
+!/docs/**/*.md
+!/.github/**/*.md

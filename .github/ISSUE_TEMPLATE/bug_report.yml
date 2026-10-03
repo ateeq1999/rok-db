@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work as documented.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please search existing issues first.
+        Security issues must be reported privately (see SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Model definitions, schema (SQL) and the code that fails. `to_sql()` output helps a lot.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: rok-db version and features
+      placeholder: 0.1.0, features = ["chrono", "json"]
+    validations:
+      required: true
+  - type: input
+    id: rust
+    attributes:
+      label: Rust version (`rustc --version`)
+    validations:
+      required: true
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL version
+    validations:
+      required: true

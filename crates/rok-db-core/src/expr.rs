@@ -370,7 +370,9 @@ impl Cond {
 /// Sort direction for `ORDER BY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// Ascending (`ASC`).
     Asc,
+    /// Descending (`DESC`).
     Desc,
 }
 

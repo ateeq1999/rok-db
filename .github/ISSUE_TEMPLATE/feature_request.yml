@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest an improvement. Large or breaking changes need an RFC (docs/rfcs).
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: Show how you'd like to write it, and the SQL it should generate.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Would this be a breaking change?
+      options: ["No", "Yes", "Not sure"]
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'm willing to open a pull request for this

@@ -3,8 +3,6 @@
 //! Most users should depend on the `rok-db` crate, which re-exports
 //! everything here together with the `#[derive(Model)]` macro.
 
-#![warn(missing_debug_implementations)]
-
 mod db;
 mod error;
 mod expr;
