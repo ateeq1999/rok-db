@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "rok-db"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum-core",
  "http-body-util",
@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "rok-db-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "axum-core",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "rok-db-macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
