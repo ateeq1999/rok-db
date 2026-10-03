@@ -9,6 +9,9 @@ rust-version.workspace = true
 homepage.workspace = true
 authors.workspace = true
 readme = "../../README.md"
+documentation = "https://docs.rs/rok-db-macros"
+keywords = ["orm", "derive", "postgres", "sqlx"]
+categories = ["database", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true
