@@ -19,6 +19,7 @@ chrono = ["rok-db-core/chrono"]
 uuid = ["rok-db-core/uuid"]
 json = ["rok-db-core/json"]
 migrate = ["rok-db-core/migrate"]
+testing = ["rok-db-core/testing"]
 full = ["chrono", "uuid", "json", "migrate"]
 
 [dependencies]

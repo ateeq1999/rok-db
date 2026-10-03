@@ -101,9 +101,13 @@ where
     Ok(result?)
 }
 
-pub(crate) async fn fetch_rows<'e, E: Executor<'e>>(executor: E, sql: &Sql) -> Result<Vec<PgRow>> {
+pub(crate) async fn fetch_rows<'e, E: Executor<'e>>(
+    executor: E,
+    sql: &Sql,
+    writes: Writes<'_>,
+) -> Result<Vec<PgRow>> {
     let args = sql.arguments()?;
-    let probe = Probe::start(&executor, sql, &[]);
+    let probe = Probe::start(&executor, sql, writes);
     let result = sqlx::query_with(sql.as_str(), args)
         .fetch_all(executor)
         .await;

@@ -44,8 +44,10 @@ export DATABASE_URL=postgres://postgres:postgres@localhost/rok_db_test
 cargo test --workspace --all-features
 ```
 
-The database tests use per-connection `TEMP` tables, so they never touch
-existing data and can run in parallel.
+The database tests use per-connection `TEMP` tables or, with the `testing`
+feature, a temporary database per test (`#[rok_db::test]`), so they never
+touch existing data and can run in parallel. The `DATABASE_URL` user needs
+the `CREATEDB` privilege.
 
 Before pushing, run the same checks as CI:
 

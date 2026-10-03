@@ -1,5 +1,8 @@
-use sqlx::Arguments;
+use std::fmt;
+use std::sync::Arc;
+
 use sqlx::postgres::PgArguments;
+use sqlx::{Arguments, Encode, Postgres, Type};
 
 use crate::Result;
 
@@ -49,9 +52,28 @@ pub enum Value {
     #[cfg(feature = "json")]
     /// `JSONB` / `JSON`
     Json(Option<serde_json::Value>),
+    /// Any other type sqlx can encode: enums and newtypes from
+    /// `#[derive(DbEnum)]` / `#[derive(DbNewtype)]`, or types registered
+    /// with [`impl_value!`](crate::impl_value). Build one with [`Value::custom`].
+    Custom(CustomValue),
 }
 
 impl Value {
+    /// Wrap any value sqlx can encode for PostgreSQL. `None` binds a `NULL`
+    /// of `T`'s SQL type.
+    pub fn custom<T>(value: Option<T>) -> Self
+    where
+        T: for<'q> Encode<'q, Postgres>
+            + Type<Postgres>
+            + Clone
+            + fmt::Debug
+            + Send
+            + Sync
+            + 'static,
+    {
+        Value::Custom(CustomValue(Arc::new(value)))
+    }
+
     /// `true` if this value is a (typed) SQL `NULL`.
     pub fn is_null(&self) -> bool {
         match self {
@@ -75,6 +97,7 @@ impl Value {
             Value::NaiveTime(v) => v.is_none(),
             #[cfg(feature = "json")]
             Value::Json(v) => v.is_none(),
+            Value::Custom(v) => v.0.is_null(),
         }
     }
 
@@ -100,9 +123,103 @@ impl Value {
             Value::NaiveTime(v) => args.add(v),
             #[cfg(feature = "json")]
             Value::Json(v) => args.add(v),
+            Value::Custom(v) => v.0.bind(args),
         };
         res.map_err(crate::Error::Encode)
     }
+}
+
+/// A value of a user-defined type; see [`Value::custom`].
+#[derive(Clone)]
+pub struct CustomValue(Arc<dyn DynValue>);
+
+trait DynValue: Send + Sync {
+    fn bind(&self, args: &mut PgArguments) -> std::result::Result<(), sqlx::error::BoxDynError>;
+    fn is_null(&self) -> bool;
+    fn show(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+impl<T> DynValue for Option<T>
+where
+    T: for<'q> Encode<'q, Postgres> + Type<Postgres> + Clone + fmt::Debug + Send + Sync + 'static,
+{
+    fn bind(&self, args: &mut PgArguments) -> std::result::Result<(), sqlx::error::BoxDynError> {
+        args.add(self.clone())
+    }
+
+    fn is_null(&self) -> bool {
+        self.is_none()
+    }
+
+    fn show(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Some(v) => write!(f, "{v:?}"),
+            None => f.write_str("NULL"),
+        }
+    }
+}
+
+impl fmt::Debug for CustomValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.show(f)
+    }
+}
+
+impl PartialEq for CustomValue {
+    /// Custom values compare by their debug representation.
+    fn eq(&self, other: &Self) -> bool {
+        format!("{self:?}") == format!("{other:?}")
+    }
+}
+
+/// Marker for user-defined column types stored through [`Value::custom`].
+///
+/// Implemented by [`impl_value!`](crate::impl_value), `#[derive(DbEnum)]` and
+/// `#[derive(DbNewtype)]`; it unlocks `From<Option<T>>` and
+/// `From<&Option<T>>` for [`Value`], which a downstream crate couldn't write
+/// itself.
+pub trait CustomType:
+    for<'q> Encode<'q, Postgres> + Type<Postgres> + Clone + fmt::Debug + Send + Sync + 'static
+{
+}
+
+impl<T: CustomType> From<Option<T>> for Value {
+    fn from(v: Option<T>) -> Self {
+        Value::custom(v)
+    }
+}
+
+impl<T: CustomType> From<&Option<T>> for Value {
+    fn from(v: &Option<T>) -> Self {
+        Value::custom(v.clone())
+    }
+}
+
+/// Make a type usable as a rok-db column value (in models, filters and
+/// `set`), given that it already implements sqlx's `Type` and `Encode` for
+/// PostgreSQL plus `Clone + Debug`. Implements [`CustomType`] and
+/// `From<T>` / `From<&T>` for [`Value`] (`Option<T>` then works too).
+///
+/// `#[derive(DbEnum)]` and `#[derive(DbNewtype)]` do this for you.
+///
+/// ```ignore
+/// rok_db::impl_value!(my_crate::Money);
+/// ```
+#[macro_export]
+macro_rules! impl_value {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl $crate::CustomType for $ty {}
+        impl ::core::convert::From<$ty> for $crate::Value {
+            fn from(v: $ty) -> Self {
+                $crate::Value::custom(::core::option::Option::Some(v))
+            }
+        }
+        impl ::core::convert::From<&$ty> for $crate::Value {
+            fn from(v: &$ty) -> Self {
+                $crate::Value::custom(::core::option::Option::Some(::core::clone::Clone::clone(v)))
+            }
+        }
+    )+};
 }
 
 macro_rules! impl_from {
@@ -242,6 +359,7 @@ impl std::fmt::Display for Value {
             Value::NaiveTime(v) => show(f, v),
             #[cfg(feature = "json")]
             Value::Json(v) => show(f, v),
+            Value::Custom(v) => v.0.show(f),
         }
     }
 }

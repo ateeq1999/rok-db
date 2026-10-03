@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Custom column types: `#[derive(DbEnum)]` (TEXT or native PostgreSQL
+  enums, with `rename`/`rename_all`), `#[derive(DbNewtype)]`,
+  `impl_value!`, `Value::Custom` / `Value::custom` and the `CustomType`
+  marker trait.
+- Validation: `#[rok(validate(length, range, email, non_empty, custom))]`
+  field rules and `#[rok(validate_with = …)]`, checked before every insert,
+  upsert and save; `Error::Validation` with `ValidationErrors`.
+- Lifecycle hooks: the `Hooks` trait (`before_/after_` insert, save and
+  delete), implemented by the user with `#[rok(hooks)]`; `Error::Hook`.
+- Scopes: `#[rok(default_scope = …)]`, `Select::unscoped`,
+  `Update::unscoped` and `Select::scope` for reusable named scopes.
+- Transactions with options: `Db::transaction_with`, `TxOptions`
+  (isolation level, read-only, retries with backoff), `Isolation`, the
+  `Retryable` trait and `Error::is_serialization_failure`.
+- Testing support (feature `testing`): `#[rok_db::test]` and
+  `testing::TestDb` create a temporary database per test.
+- `Select` is now part of the prelude.
+
+- Keyset pagination: `Select::cursor_paginate` returning a `CursorPage`
+  with an opaque, URL-safe `Cursor` (mixed sort directions, primary-key
+  tiebreaker).
+- Soft deletes: `#[rok(soft_delete)]` / `#[rok(deleted_at)]`; queries,
+  counts, relations and subqueries skip deleted rows; `with_trashed`,
+  `only_trashed`, `restore`, `force_delete` and `Model::is_trashed`.
+- Optimistic locking: `#[rok(version)]`; `save` and `delete` detect stale
+  records in one round trip and fail with `Error::Conflict`
+  (`Error::is_conflict`); bulk updates and upserts increment the version.
+- Configurable upserts: `Model::upsert_on`, `Model::insert_many` and
+  `Insert::{on_conflict, on_constraint, do_nothing, do_update,
+  do_update_all, exec_optional}`.
+- Subqueries: `Column::in_subquery`, `Column::not_in_subquery`,
+  `Expr::exists`, `Expr::not_exists` and `Column::eq_outer` for correlated
+  subqueries.
+- RFC 0001 proposing typed joins.
+
 - Relations: `#[rok(belongs_to = …)]`, `#[rok(has_many(…))]` and
   `#[rok(has_one(…))]` generate `BelongsTo`/`HasMany`/`HasOne` constants
   and lazy query methods; `load`/`load_from` eager-load related records for

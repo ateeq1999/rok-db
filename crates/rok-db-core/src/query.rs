@@ -6,19 +6,50 @@ use futures_core::stream::BoxStream;
 use sqlx::postgres::PgRow;
 use sqlx::{Decode, FromRow, Postgres, Row, Type};
 
+use crate::cursor::{Cursor, CursorPage};
 use crate::exec;
+use crate::expr::Direction;
 use crate::expr::{Cond, IntoProjections, Projection};
 use crate::model::{push_columns, push_returning};
 use crate::sql::Sql;
 use crate::{Column, Error, Executor, Expr, Model, Order, Page, Result, Value};
 
-fn push_where(sql: &mut Sql, keyword: &str, filters: &[Cond]) {
-    if filters.is_empty() {
+fn push_where<'a>(sql: &mut Sql, keyword: &str, filters: impl IntoIterator<Item = &'a Cond>) {
+    let mut filters = filters.into_iter().peekable();
+    if filters.peek().is_none() {
         return;
     }
     sql.push(keyword);
     // Groups render their own parentheses, so a top-level AND chain is safe.
     sql.push_list(filters, " AND ", |sql, cond| cond.write(sql));
+}
+
+/// Which soft-deleted rows a query sees (only relevant for models with a
+/// `deleted_at` column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trashed {
+    Exclude,
+    Include,
+    Only,
+}
+
+impl Trashed {
+    /// The implicit soft-delete condition for model `M`, if any.
+    fn cond<M: Model>(self) -> Option<Cond> {
+        let column = M::DELETED_AT_COLUMN?;
+        match self {
+            Trashed::Exclude => Some(Column::<M>::new(column).is_null().cond),
+            Trashed::Only => Some(Column::<M>::new(column).is_not_null().cond),
+            Trashed::Include => None,
+        }
+    }
+}
+
+/// Implicit conditions: the soft-delete scope and, unless `unscoped`, the
+/// model's default scope.
+fn implicit<M: Model>(trashed: Trashed, scoped: bool) -> Vec<Cond> {
+    let default = scoped.then(M::default_scope).flatten().map(|e| e.cond);
+    trashed.cond::<M>().into_iter().chain(default).collect()
 }
 
 /// Lock mode appended to a `SELECT`.
@@ -40,6 +71,8 @@ pub struct Select<M> {
     limit: Option<u64>,
     offset: Option<u64>,
     lock: Option<Lock>,
+    trashed: Trashed,
+    scoped: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -60,6 +93,8 @@ impl<M: Model> Select<M> {
             limit: None,
             offset: None,
             lock: None,
+            trashed: Trashed::Exclude,
+            scoped: true,
             _model: PhantomData,
         }
     }
@@ -67,6 +102,39 @@ impl<M: Model> Select<M> {
     /// Add a `WHERE` condition. Multiple calls are combined with `AND`.
     pub fn filter(mut self, expr: Expr<M>) -> Self {
         self.filters.push(expr.cond);
+        self
+    }
+
+    /// Apply a reusable query fragment ("named scope"):
+    ///
+    /// ```ignore
+    /// fn active(q: Select<User>) -> Select<User> { q.filter(User::ACTIVE.eq(true)) }
+    /// fn newest(q: Select<User>) -> Select<User> { q.order_by(User::ID.desc()) }
+    ///
+    /// User::query().scope(active).scope(newest).limit(10)
+    /// ```
+    pub fn scope(self, scope: impl FnOnce(Self) -> Self) -> Self {
+        scope(self)
+    }
+
+    /// Drop the model's default scope (`#[rok(default_scope = …)]`) for this
+    /// query. Soft-delete filtering is controlled separately with
+    /// [`with_trashed`](Self::with_trashed).
+    pub fn unscoped(mut self) -> Self {
+        self.scoped = false;
+        self
+    }
+
+    /// Include soft-deleted rows (models with `#[rok(soft_delete)]` exclude
+    /// them by default). No effect on other models.
+    pub fn with_trashed(mut self) -> Self {
+        self.trashed = Trashed::Include;
+        self
+    }
+
+    /// Only soft-deleted rows. No effect on models without soft deletes.
+    pub fn only_trashed(mut self) -> Self {
+        self.trashed = Trashed::Only;
         self
     }
 
@@ -162,6 +230,8 @@ impl<M: Model> Select<M> {
         Update {
             filters: self.filters,
             sets: Vec::new(),
+            trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -201,7 +271,14 @@ impl<M: Model> Select<M> {
 
     fn write_from_where(&self, sql: &mut Sql) {
         sql.push(" FROM ").push_ident(M::TABLE);
-        push_where(sql, " WHERE ", &self.filters);
+        let implicit = implicit::<M>(self.trashed, self.scoped);
+        push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
+    }
+
+    /// `SELECT 1 FROM … WHERE …`, the body of an `EXISTS` subquery.
+    pub(crate) fn write_exists_body(&self, sql: &mut Sql) {
+        sql.push("SELECT 1");
+        self.write_tail(sql);
     }
 
     fn write_order(&self, sql: &mut Sql, prefix: &str) {
@@ -332,7 +409,7 @@ impl<M: Model> Select<M> {
             ));
         }
         let page = page.max(1);
-        let rows = exec::fetch_rows(executor, &self.paginate_sql(page, per_page)).await?;
+        let rows = exec::fetch_rows(executor, &self.paginate_sql(page, per_page), &[]).await?;
 
         let mut total = 0;
         let mut items = Vec::with_capacity(rows.len());
@@ -361,17 +438,150 @@ impl<M: Model> Select<M> {
         sql
     }
 
-    /// `DELETE` every matching row and return how many were deleted.
+    /// Delete every matching row and return how many were deleted.
+    ///
+    /// For models with soft deletes this sets `deleted_at = now()` instead;
+    /// use [`force_delete`](Self::force_delete) to remove rows for good.
     pub async fn delete<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
         exec::execute(executor, &self.delete_sql(), &[M::TABLE]).await
     }
 
-    /// Render the `DELETE` statement [`delete`](Self::delete) would run.
+    /// Render the statement [`delete`](Self::delete) would run.
     pub fn delete_sql(&self) -> Sql {
+        match M::DELETED_AT_COLUMN {
+            Some(deleted_at) => self
+                .clone()
+                .update()
+                .set_raw(Column::new(deleted_at), "now()", [] as [Value; 0])
+                .to_sql(),
+            None => self.force_delete_sql(),
+        }
+    }
+
+    /// `DELETE` every matching row, even for models with soft deletes.
+    /// Soft-deleted rows are only matched with
+    /// [`with_trashed`](Self::with_trashed) or [`only_trashed`](Self::only_trashed).
+    pub async fn force_delete<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
+        exec::execute(executor, &self.force_delete_sql(), &[M::TABLE]).await
+    }
+
+    pub(crate) fn force_delete_sql(&self) -> Sql {
         let mut sql = Sql::new();
         sql.push("DELETE");
         self.write_from_where(&mut sql);
         sql
+    }
+
+    /// Restore every matching soft-deleted row (`deleted_at = NULL`) and
+    /// return how many were restored.
+    pub async fn restore<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
+        let Some(deleted_at) = M::DELETED_AT_COLUMN else {
+            return Err(Error::InvalidQuery(format!(
+                "`{}` has no soft-delete column",
+                M::TABLE
+            )));
+        };
+        self.only_trashed()
+            .update()
+            .set_raw(Column::new(deleted_at), "NULL", [] as [Value; 0])
+            .exec(executor)
+            .await
+    }
+
+    /// The ordering used for keyset pagination: the query's `ORDER BY`
+    /// columns plus the primary key as a tiebreaker.
+    fn keyset_order(&self) -> Vec<(&'static str, Direction)> {
+        let mut order: Vec<_> = self.order.iter().map(|o| (o.column, o.direction)).collect();
+        if !order.iter().any(|(c, _)| *c == M::PRIMARY_KEY) {
+            order.push((M::PRIMARY_KEY, Direction::Asc));
+        }
+        order
+    }
+
+    /// Keyset ("cursor") pagination: fetch up to `limit` rows after
+    /// `cursor`, following the query's `ORDER BY` (the primary key is added
+    /// as a tiebreaker). Unlike [`paginate`](Self::paginate), the cost
+    /// doesn't grow with the page number and rows aren't skipped or repeated
+    /// when data changes between requests.
+    ///
+    /// Ordering columns must be `NOT NULL`. Pass `None` for the first page,
+    /// then `page.next` for the following ones:
+    ///
+    /// ```ignore
+    /// let page = Post::order_by(Post::CREATED_AT.desc())
+    ///     .cursor_paginate(&db, None, 20)
+    ///     .await?;
+    /// let token = page.next.map(|c| c.to_string()); // hand to the client
+    ///
+    /// let cursor: Cursor = token.unwrap().parse()?;
+    /// let page2 = Post::order_by(Post::CREATED_AT.desc())
+    ///     .cursor_paginate(&db, Some(&cursor), 20)
+    ///     .await?;
+    /// ```
+    pub async fn cursor_paginate<'e, E: Executor<'e>>(
+        self,
+        executor: E,
+        after: Option<&Cursor>,
+        limit: u64,
+    ) -> Result<CursorPage<M>> {
+        if limit == 0 {
+            return Err(Error::InvalidQuery("`limit` must be greater than 0".into()));
+        }
+        let select = self.cursor_select(after, limit)?;
+        let order = select.keyset_order();
+        let mut items = select.all(executor).await?;
+        let next = if items.len() as u64 > limit {
+            items.truncate(limit as usize);
+            let last = items.last().expect("limit > 0");
+            let values = order
+                .iter()
+                .map(|(c, _)| {
+                    last.value_of(c).ok_or_else(|| {
+                        Error::InvalidQuery(format!("`{c}` is not a column of `{}`", M::TABLE))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Some(Cursor::new(values))
+        } else {
+            None
+        };
+        Ok(CursorPage { items, next })
+    }
+
+    fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
+        let order = self.keyset_order();
+        let mut select = self;
+        select.order = order
+            .iter()
+            .map(|(c, d)| match d {
+                Direction::Asc => Column::new(c).asc(),
+                Direction::Desc => Column::new(c).desc(),
+            })
+            .collect();
+        select.offset = None;
+        select.limit = Some(limit + 1);
+        if let Some(cursor) = after {
+            if cursor.values.len() != order.len() {
+                return Err(Error::InvalidCursor(format!(
+                    "expected {} values, got {}",
+                    order.len(),
+                    cursor.values.len()
+                )));
+            }
+            // (a > x) OR (a = x AND b > y) OR … — works for mixed directions.
+            let branches = (0..order.len()).map(|i| {
+                let eqs = (0..i).map(|j| Column::<M>::new(order[j].0).eq(cursor.values[j].clone()));
+                let (column, direction) = order[i];
+                let value = cursor.values[i].clone();
+                let step = match direction {
+                    Direction::Asc => Column::<M>::new(column).gt(value),
+                    Direction::Desc => Column::<M>::new(column).lt(value),
+                };
+                Expr::all_of(eqs.chain([step]))
+            });
+            select = select.filter(Expr::any_of(branches));
+        }
+        Ok(select)
     }
 }
 
@@ -385,6 +595,8 @@ impl<M> Clone for Select<M> {
             limit: self.limit,
             offset: self.offset,
             lock: self.lock,
+            trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -407,10 +619,14 @@ impl<M: Model> Projected<M> {
     /// Render the `SELECT` statement.
     pub fn to_sql(&self) -> Sql {
         let mut sql = Sql::new();
+        self.write_into(&mut sql);
+        sql
+    }
+
+    pub(crate) fn write_into(&self, sql: &mut Sql) {
         sql.push("SELECT ");
         sql.push_list(&self.items, ", ", |sql, p| p.write(sql));
-        self.select.write_tail(&mut sql);
-        sql
+        self.select.write_tail(sql);
     }
 
     /// Fetch every row, decoded into `T` (a tuple or a `FromRow` type).
@@ -590,11 +806,15 @@ impl<M: Model> fmt::Debug for Memoized<M> {
 /// A bulk `UPDATE` over model `M`, created with [`Model::update_all`] or
 /// [`Select::update`].
 ///
-/// For models with an `updated_at` timestamp, `updated_at = now()` is added
-/// automatically unless you set it yourself.
+/// Managed columns are maintained automatically unless you set them
+/// yourself: `updated_at = now()` for models with timestamps and
+/// `version = version + 1` for models with optimistic locking. Soft-deleted
+/// rows are skipped unless the query used `with_trashed`/`only_trashed`.
 pub struct Update<M> {
     filters: Vec<Cond>,
     sets: Vec<(&'static str, Assign)>,
+    trashed: Trashed,
+    scoped: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -609,13 +829,27 @@ impl<M: Model> Update<M> {
         Self {
             filters: Vec::new(),
             sets: Vec::new(),
+            trashed: Trashed::Exclude,
+            scoped: true,
             _model: PhantomData,
         }
+    }
+
+    /// Ignore the model's default scope.
+    pub fn unscoped(mut self) -> Self {
+        self.scoped = false;
+        self
     }
 
     /// Add a `WHERE` condition. Multiple calls are combined with `AND`.
     pub fn filter(mut self, expr: Expr<M>) -> Self {
         self.filters.push(expr.cond);
+        self
+    }
+
+    /// Also update soft-deleted rows.
+    pub fn with_trashed(mut self) -> Self {
+        self.trashed = Trashed::Include;
         self
     }
 
@@ -661,13 +895,24 @@ impl<M: Model> Update<M> {
     pub(crate) fn into_select(self) -> Select<M> {
         Select {
             filters: self.filters,
+            trashed: self.trashed,
+            scoped: self.scoped,
             ..Select::new()
         }
+    }
+
+    fn is_set(&self, column: &str) -> bool {
+        self.sets.iter().any(|(c, _)| *c == column)
     }
 
     /// Render the `UPDATE` statement.
     pub fn to_sql(&self) -> Sql {
         let mut sql = Sql::new();
+        self.write_into(&mut sql);
+        sql
+    }
+
+    pub(crate) fn write_into(&self, sql: &mut Sql) {
         sql.push("UPDATE ").push_ident(M::TABLE).push(" SET ");
         sql.push_list(&self.sets, ", ", |sql, (column, assign)| {
             sql.push_ident(column).push(" = ");
@@ -677,38 +922,49 @@ impl<M: Model> Update<M> {
             };
         });
         if let Some(updated_at) = M::UPDATED_AT_COLUMN {
-            if !self.sets.iter().any(|(c, _)| *c == updated_at) {
+            if !self.is_set(updated_at) {
                 sql.push(", ").push_ident(updated_at).push(" = now()");
             }
         }
-        push_where(&mut sql, " WHERE ", &self.filters);
-        sql
+        if let Some(version) = M::VERSION_COLUMN {
+            if !self.is_set(version) {
+                sql.push(", ")
+                    .push_ident(version)
+                    .push(" = ")
+                    .push_ident(version)
+                    .push(" + 1");
+            }
+        }
+        let implicit = implicit::<M>(self.trashed, self.scoped);
+        push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
-    fn checked_sql(&self) -> Result<Sql> {
+    fn check(&self) -> Result<()> {
         if self.sets.is_empty() {
             return Err(Error::InvalidQuery(format!(
                 "UPDATE on `{}` has no columns to set",
                 M::TABLE
             )));
         }
-        Ok(self.to_sql())
+        Ok(())
     }
 
     /// Run the update and return the number of affected rows.
     pub async fn exec<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
-        exec::execute(executor, &self.checked_sql()?, &[M::TABLE]).await
+        self.check()?;
+        exec::execute(executor, &self.to_sql(), &[M::TABLE]).await
     }
 
     /// Run the update and return the updated rows.
     pub async fn returning<'e, E: Executor<'e>>(self, executor: E) -> Result<Vec<M>> {
-        let mut sql = self.checked_sql()?;
+        self.check()?;
+        let mut sql = self.to_sql();
         push_returning::<M>(&mut sql);
         exec::fetch_all(executor, &sql, &[M::TABLE]).await
     }
 
     pub(crate) async fn returning_one<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
-        let mut sql = self.checked_sql()?;
+        let mut sql = self.to_sql();
         push_returning::<M>(&mut sql);
         exec::fetch_optional(executor, &sql, &[M::TABLE]).await
     }
@@ -719,6 +975,8 @@ impl<M> Clone for Update<M> {
         Self {
             filters: self.filters.clone(),
             sets: self.sets.clone(),
+            trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -736,12 +994,175 @@ fn quoted(ident: &str) -> String {
     s
 }
 
+// ----- ON CONFLICT -------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) enum ConflictTarget {
+    None,
+    Columns(Vec<&'static str>),
+    Constraint(&'static str),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ConflictAction {
+    Nothing,
+    Update(Vec<&'static str>),
+    UpdateAll,
+}
+
+/// An `ON CONFLICT` clause.
+#[derive(Debug, Clone)]
+pub(crate) struct Conflict {
+    pub(crate) target: ConflictTarget,
+    pub(crate) action: ConflictAction,
+}
+
+impl Conflict {
+    /// Write ` ON CONFLICT … DO …` for an insert of `inserted` columns.
+    pub(crate) fn write<M: Model>(&self, sql: &mut Sql, inserted: &[&'static str]) -> Result<()> {
+        sql.push(" ON CONFLICT");
+        let target_columns: &[&str] = match &self.target {
+            ConflictTarget::None => &[],
+            ConflictTarget::Columns(columns) => {
+                sql.push(" (")
+                    .push_list(columns, ", ", |sql, c| {
+                        sql.push_ident(c);
+                    })
+                    .push(")");
+                columns
+            }
+            ConflictTarget::Constraint(name) => {
+                sql.push(" ON CONSTRAINT ").push_ident(name);
+                &[]
+            }
+        };
+        let mut updates: Vec<&'static str> = match &self.action {
+            ConflictAction::Nothing => {
+                sql.push(" DO NOTHING");
+                return Ok(());
+            }
+            ConflictAction::Update(columns) => columns.clone(),
+            ConflictAction::UpdateAll => inserted
+                .iter()
+                .copied()
+                .filter(|c| {
+                    !target_columns.contains(c)
+                        && *c != M::PRIMARY_KEY
+                        && M::CREATED_AT_COLUMN != Some(*c)
+                })
+                .collect(),
+        };
+        if matches!(self.target, ConflictTarget::None) {
+            return Err(Error::InvalidQuery(
+                "ON CONFLICT DO UPDATE needs conflict columns or a constraint".into(),
+            ));
+        }
+        // Managed columns are maintained, never copied from the new row.
+        updates.retain(|c| M::VERSION_COLUMN != Some(*c) && M::UPDATED_AT_COLUMN != Some(*c));
+        sql.push(" DO UPDATE SET ");
+        let mut first = true;
+        let mut sep = |sql: &mut Sql| {
+            if !std::mem::take(&mut first) {
+                sql.push(", ");
+            }
+        };
+        for column in &updates {
+            sep(sql);
+            sql.push_ident(column)
+                .push(" = EXCLUDED.")
+                .push_ident(column);
+        }
+        if let Some(updated_at) = M::UPDATED_AT_COLUMN {
+            sep(sql);
+            sql.push_ident(updated_at).push(" = now()");
+        }
+        if let Some(version) = M::VERSION_COLUMN {
+            sep(sql);
+            sql.push_ident(version)
+                .push(" = ")
+                .push_ident(M::TABLE)
+                .push(".")
+                .push_ident(version)
+                .push(" + 1");
+        }
+        if first {
+            // Nothing to change, but `DO UPDATE` still returns the row.
+            sql.push_ident(M::PRIMARY_KEY)
+                .push(" = ")
+                .push_ident(M::TABLE)
+                .push(".")
+                .push_ident(M::PRIMARY_KEY);
+        }
+        Ok(())
+    }
+}
+
+macro_rules! on_conflict_methods {
+    () => {
+        /// Handle conflicts on these columns (a unique index or the primary
+        /// key). Follow with [`do_nothing`](Self::do_nothing),
+        /// [`do_update`](Self::do_update) or
+        /// [`do_update_all`](Self::do_update_all).
+        pub fn on_conflict(mut self, columns: impl IntoIterator<Item = Column<M>>) -> Self {
+            self.conflict_target = Some(ConflictTarget::Columns(
+                columns.into_iter().map(|c| c.name()).collect(),
+            ));
+            self
+        }
+
+        /// Handle conflicts on the named constraint.
+        pub fn on_constraint(mut self, name: &'static str) -> Self {
+            self.conflict_target = Some(ConflictTarget::Constraint(name));
+            self
+        }
+
+        /// `ON CONFLICT … DO NOTHING`: skip conflicting rows. Without
+        /// [`on_conflict`](Self::on_conflict), any conflict is ignored.
+        pub fn do_nothing(mut self) -> Self {
+            self.conflict_action = Some(ConflictAction::Nothing);
+            self
+        }
+
+        /// `ON CONFLICT … DO UPDATE` setting these columns from the new row.
+        pub fn do_update(mut self, columns: impl IntoIterator<Item = Column<M>>) -> Self {
+            self.conflict_action = Some(ConflictAction::Update(
+                columns.into_iter().map(|c| c.name()).collect(),
+            ));
+            self
+        }
+
+        /// `ON CONFLICT … DO UPDATE` setting every inserted column except the
+        /// conflict columns, the primary key and `created_at`. With
+        /// [`on_constraint`](Self::on_constraint) the constraint's columns
+        /// aren't known, so they are rewritten with their (equal) new values.
+        pub fn do_update_all(mut self) -> Self {
+            self.conflict_action = Some(ConflictAction::UpdateAll);
+            self
+        }
+
+        fn conflict(&self) -> Result<Option<Conflict>> {
+            match (&self.conflict_target, &self.conflict_action) {
+                (None, None) => Ok(None),
+                (target, Some(action)) => Ok(Some(Conflict {
+                    target: target.clone().unwrap_or(ConflictTarget::None),
+                    action: action.clone(),
+                })),
+                (Some(_), None) => Err(Error::InvalidQuery(
+                    "`on_conflict` needs `do_nothing`, `do_update` or `do_update_all`".into(),
+                )),
+            }
+        }
+    };
+}
+
 /// An `INSERT` of a single row built column by column, created with
 /// [`Model::create`]. Columns you don't set get their database default;
 /// timestamp columns default to `now()`.
 pub struct Insert<M> {
     /// `(column, raw sql, params)`; plain values are stored as `"?"`.
     values: Vec<(&'static str, String, Vec<Value>)>,
+    conflict_target: Option<ConflictTarget>,
+    conflict_action: Option<ConflictAction>,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -749,6 +1170,8 @@ impl<M: Model> Insert<M> {
     pub(crate) fn new() -> Self {
         Self {
             values: Vec::new(),
+            conflict_target: None,
+            conflict_action: None,
             _model: PhantomData,
         }
     }
@@ -772,8 +1195,15 @@ impl<M: Model> Insert<M> {
         self
     }
 
-    /// Render the `INSERT` statement.
+    on_conflict_methods!();
+
+    /// Render the `INSERT` statement. An incomplete `ON CONFLICT`
+    /// configuration is left out here and reported by `exec`.
     pub fn to_sql(&self) -> Sql {
+        self.build(false).expect("lenient rendering never fails")
+    }
+
+    fn build(&self, strict: bool) -> Result<Sql> {
         let mut values = self.values.clone();
         for ts in [M::CREATED_AT_COLUMN, M::UPDATED_AT_COLUMN]
             .into_iter()
@@ -798,15 +1228,37 @@ impl<M: Model> Insert<M> {
                 })
                 .push(")");
         }
+        let conflict = match self.conflict() {
+            Ok(conflict) => conflict,
+            Err(e) if strict => return Err(e),
+            Err(_) => None,
+        };
+        if let Some(conflict) = conflict {
+            let inserted: Vec<_> = values.iter().map(|(c, _, _)| *c).collect();
+            let mut with_conflict = sql.clone();
+            match conflict.write::<M>(&mut with_conflict, &inserted) {
+                Ok(()) => sql = with_conflict,
+                Err(e) if strict => return Err(e),
+                Err(_) => {}
+            }
+        }
         push_returning::<M>(&mut sql);
-        sql
+        Ok(sql)
     }
 
-    /// Run the insert and return the stored row.
+    /// Run the insert and return the stored row. With
+    /// [`do_nothing`](Self::do_nothing), a skipped row is an
+    /// [`Error::NotFound`]; use [`exec_optional`](Self::exec_optional).
     pub async fn exec<'e, E: Executor<'e>>(self, executor: E) -> Result<M> {
-        exec::fetch_optional(executor, &self.to_sql(), &[M::TABLE])
+        self.exec_optional(executor)
             .await?
             .ok_or_else(|| Error::not_found::<M>(None))
+    }
+
+    /// Run the insert and return the stored row, or `None` if it was
+    /// skipped by `ON CONFLICT … DO NOTHING`.
+    pub async fn exec_optional<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
+        exec::fetch_optional(executor, &self.build(true)?, &[M::TABLE]).await
     }
 }
 
@@ -814,6 +1266,8 @@ impl<M> Clone for Insert<M> {
     fn clone(&self) -> Self {
         Self {
             values: self.values.clone(),
+            conflict_target: self.conflict_target.clone(),
+            conflict_action: self.conflict_action.clone(),
             _model: PhantomData,
         }
     }
@@ -825,7 +1279,84 @@ impl<M: Model> fmt::Debug for Insert<M> {
     }
 }
 
+/// An `INSERT` of whole records, created with [`Model::insert_many`].
+/// Generated columns are skipped and timestamps are set to `now()`.
+pub struct InsertMany<'a, M> {
+    records: &'a [M],
+    conflict_target: Option<ConflictTarget>,
+    conflict_action: Option<ConflictAction>,
+}
+
+impl<'a, M: Model> InsertMany<'a, M> {
+    pub(crate) fn new(records: &'a [M]) -> Self {
+        Self {
+            records,
+            conflict_target: None,
+            conflict_action: None,
+        }
+    }
+
+    on_conflict_methods!();
+
+    /// Render the `INSERT` statement. An incomplete `ON CONFLICT`
+    /// configuration is left out here and reported by `exec`.
+    pub fn to_sql(&self) -> Sql {
+        let conflict = self.conflict().ok().flatten();
+        crate::model::insert_sql(self.records, false, conflict.as_ref())
+            .or_else(|_| crate::model::insert_sql(self.records, false, None))
+            .expect("rendering without ON CONFLICT never fails")
+    }
+
+    fn build(&self) -> Result<Sql> {
+        crate::model::insert_sql(self.records, false, self.conflict()?.as_ref())
+    }
+
+    /// Run the insert and return the stored rows. Rows skipped by
+    /// `ON CONFLICT … DO NOTHING` are not returned.
+    ///
+    /// Every record is validated and passed to `before_insert` first; each
+    /// returned row is passed to `after_insert`.
+    pub async fn exec<'e, E: Executor<'e>>(self, executor: E) -> Result<Vec<M>> {
+        if self.records.is_empty() {
+            return Ok(Vec::new());
+        }
+        for record in self.records {
+            crate::model::pre_insert(record)?;
+        }
+        let rows: Vec<M> = exec::fetch_all(executor, &self.build()?, &[M::TABLE]).await?;
+        for row in &rows {
+            row.after_insert()?;
+        }
+        Ok(rows)
+    }
+}
+
+impl<M> Clone for InsertMany<'_, M> {
+    fn clone(&self) -> Self {
+        Self {
+            records: self.records,
+            conflict_target: self.conflict_target.clone(),
+            conflict_action: self.conflict_action.clone(),
+        }
+    }
+}
+
+impl<M: Model> fmt::Debug for InsertMany<'_, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("InsertMany").field(&self.to_sql()).finish()
+    }
+}
+
 #[doc(hidden)]
 pub fn __paginate_sql<M: Model>(select: &Select<M>, page: u64, per_page: u64) -> Sql {
     select.paginate_sql(page, per_page)
+}
+
+#[doc(hidden)]
+pub fn __cursor_sql<M: Model>(
+    select: Select<M>,
+    after: Option<&Cursor>,
+    limit: u64,
+) -> Result<Sql> {
+    Ok(select.cursor_select(after, limit)?.to_sql())
 }

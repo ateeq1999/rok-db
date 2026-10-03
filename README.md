@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `uuid`    | `Uuid` columns                                           |
 | `json`    | `serde_json::Value` and `Json<T>` columns                 |
 | `migrate` | `Db::migrate("./migrations")`                            |
+| `testing` | `#[rok_db::test]`: a temporary database per test        |
 | `full`    | all of the above                                         |
 
 ## Quick start
@@ -97,13 +98,19 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 |---|---|---|
 | `table = "name"` | struct | table name (default: snake_case plural) |
 | `timestamps` | struct | manage `created_at` / `updated_at` automatically |
+| `soft_delete` | struct | `deleted_at` marks rows deleted; queries skip them |
+| `hooks` | struct | you implement `rok_db::Hooks` (lifecycle hooks) |
+| `validate_with = path` | struct | record-level validation `fn(&Self) -> Result<(), ValidationErrors>` |
+| `default_scope = path` | struct | `fn() -> Expr<Self>` applied to every query (remove with `.unscoped()`) |
 | `has_many(posts = Post::USER_ID)` | struct | one-to-many relation → `User::POSTS`, `user.posts()` |
 | `has_one(profile = Profile::USER_ID)` | struct | one-to-one relation → `User::PROFILE`, `user.profile()` |
 | `primary_key` | field | primary key (default: `id`) |
 | `generated` | field | filled in by the database; never written |
 | `column = "name"` | field | column name differs from the field |
 | `skip` | field | not a column |
-| `created_at` / `updated_at` | field | managed timestamp with a custom name |
+| `created_at` / `updated_at` / `deleted_at` | field | managed column with a custom name |
+| `version` | field | optimistic-locking counter |
+| `validate(length(..), range(..), email, non_empty, custom = f)` | field | validation rules |
 | `belongs_to = User` | field | `user_id` → `Post::USER`, `post.user()` (or `belongs_to(author = User)`) |
 
 ## API overview
@@ -122,6 +129,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `insert(db)` | insert (skipping `generated` columns), returns stored row |
 | `save(db)` | update by primary key, returns stored row |
 | `upsert(db)` | `INSERT … ON CONFLICT (pk) DO UPDATE` |
+| `upsert_on(db, [User::EMAIL])` | upsert on a unique column |
+| `force_delete(db)`, `restore(db)`, `is_trashed()` | soft deletes |
 | `delete(db)` | delete by primary key |
 | `reload(db)` | re-read from the database |
 
@@ -130,6 +139,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `filter`, `filter_opt`, `filter_if` | `WHERE` (combined with `AND`) |
 | `order_by`, `limit`, `offset`, `for_update`, `for_share` | |
 | `all`, `first`, `one`, `count`, `exists` | run it |
+| `cursor_paginate(db, after, limit)` | keyset pagination with an opaque cursor |
+| `with_trashed()`, `only_trashed()`, `force_delete(db)`, `restore(db)` | soft deletes |
 | `paginate(db, page, per_page)` | `Page<T>` with `total`, `total_pages()`, `has_next()` — one round trip |
 | `update().set(..)/increment(..)/set_raw(..)` | turn into a bulk `UPDATE` |
 | `delete(db)` | bulk `DELETE` |
@@ -139,8 +150,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `memoize(ttl)` | cache the result (see below) |
 | `to_sql()` | inspect the generated SQL and parameters |
 
-Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in between is_null is_not_null asc desc`.
-Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, or `Expr::raw("lower(email) = ?", [v])`.
+Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in in_subquery not_in_subquery eq_outer between is_null is_not_null asc desc`.
+Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, `Expr::exists(..)`, `Expr::not_exists(..)`, or `Expr::raw("lower(email) = ?", [v])`.
 
 ### Relations
 
@@ -264,6 +275,195 @@ let db = Db::builder().slow_query_threshold(Duration::from_millis(200)).connect(
 // e.g. RUST_LOG=rok_db=debug with tracing-subscriber's EnvFilter
 ```
 
+### Keyset pagination
+
+Offset pagination (`paginate`) gets slower with every page and can skip or repeat rows when
+data changes between requests. Keyset pagination doesn't:
+
+```rust
+let page = Post::order_by(Post::CREATED_AT.desc())
+    .cursor_paginate(&db, None, 20)          // first page
+    .await?;
+let token: Option<String> = page.next.map(|c| c.to_string());   // opaque, URL-safe
+
+// next request
+let cursor: rok_db::Cursor = token.unwrap().parse()?;
+let page = Post::order_by(Post::CREATED_AT.desc())
+    .cursor_paginate(&db, Some(&cursor), 20)
+    .await?;
+```
+
+The primary key is added as a tiebreaker automatically; ordering columns must be `NOT NULL`.
+
+### Soft deletes
+
+```rust
+#[derive(Model)]
+#[rok(soft_delete)]
+struct Doc { id: i64, title: String, deleted_at: Option<DateTime<Utc>> }
+
+doc.delete(&db).await?;                    // UPDATE … SET deleted_at = now()
+Doc::all(&db).await?;                       // skips deleted rows (also count, find, relations, subqueries)
+Doc::query().with_trashed().all(&db).await?;
+Doc::query().only_trashed().restore(&db).await?;
+doc.force_delete(&db).await?;              // real DELETE
+```
+
+### Optimistic locking
+
+```rust
+#[derive(Model)]
+struct Account { id: i64, balance: i64, #[rok(version)] version: i32 }
+
+let mut account = Account::find_or_fail(&db, 1).await?;
+account.balance += 10;
+match account.save(&db).await {
+    Ok(saved) => { /* saved.version was incremented */ }
+    Err(e) if e.is_conflict() => { /* someone else saved first: reload and retry */ }
+    Err(e) => return Err(e),
+}
+```
+
+`save` and `delete` check the version in the same statement (no extra round trip), and bulk
+updates and upserts increment it too.
+
+### Upserts
+
+```rust
+user.upsert(&db).await?;                                   // ON CONFLICT (id) DO UPDATE …
+user.upsert_on(&db, [User::EMAIL]).await?;                 // ON CONFLICT (email) DO UPDATE …
+
+User::insert_many(&users)
+    .on_conflict([User::EMAIL])
+    .do_update([User::NAME])                               // or .do_update_all() / .do_nothing()
+    .exec(&db)
+    .await?;                                               // returns inserted + updated rows
+
+let created: Option<User> = User::create()
+    .set(User::EMAIL, "ann@example.com")
+    .on_constraint("users_email_key")
+    .do_nothing()
+    .exec_optional(&db)                                    // None if it already existed
+    .await?;
+```
+
+### Subqueries
+
+```rust
+// IN (subquery)
+let authors = User::filter(User::ID.in_subquery(
+    Post::filter(Post::VIEWS.gt(100)).select(Post::AUTHOR_ID),
+)).all(&db).await?;
+
+// Correlated EXISTS / NOT EXISTS
+let without_posts = User::filter(Expr::not_exists(
+    Post::filter(Post::AUTHOR_ID.eq_outer(User::ID)),
+)).all(&db).await?;
+```
+
+Joins are designed in [RFC 0001](docs/rfcs/0001-joins.md) and not implemented yet.
+
+### Custom column types
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, DbEnum)]
+enum Role { Admin, Member, #[rok(rename = "ro")] ReadOnly }    // stored as TEXT: "admin", "member", "ro"
+
+#[derive(Debug, Clone, Copy, PartialEq, DbEnum)]
+#[rok(type_name = "mood")]                                        // a native `CREATE TYPE mood AS ENUM (…)`
+enum Mood { Happy, Sad }
+
+#[derive(Debug, Clone, PartialEq, DbNewtype)]
+struct Email(String);                                              // stored like its inner type
+
+#[derive(Model)]
+struct Member { id: i64, email: Email, role: Role, mood: Option<Mood> }
+
+Member::filter(Member::ROLE.eq(Role::Admin)).all(&db).await?;
+```
+
+Any other type that implements sqlx's `Type` + `Encode` can be registered with `rok_db::impl_value!(MyType)`.
+
+### Validation and hooks
+
+```rust
+#[derive(Model)]
+#[rok(hooks)]
+struct User {
+    id: i64,
+    #[rok(validate(length(min = 1, max = 50)))]
+    name: String,
+    #[rok(validate(email))]
+    email: String,
+    #[rok(validate(range(min = 13, max = 150)))]
+    age: i32,
+}
+
+impl Hooks for User {
+    fn before_insert(&self) -> rok_db::Result<()> {
+        if self.email.ends_with("@blocked.example") {
+            return Err(rok_db::Error::hook("domain is blocked"));
+        }
+        Ok(())
+    }
+}
+
+match user.insert(&db).await {
+    Err(rok_db::Error::Validation(errors)) => { /* errors.field("email"), errors.to_string() */ }
+    other => { /* … */ }
+}
+```
+
+Validation runs before every `insert`, `insert_all`/`insert_many`, `upsert` and `save`, collecting
+every failure. Hooks: `before_/after_` × `insert`, `save`, `delete`. Bulk query operations
+(`update()`, `delete()` on a query) skip both, by design.
+
+### Scopes
+
+```rust
+#[derive(Model)]
+#[rok(default_scope = published)]
+struct Article { id: i64, title: String, published: bool }
+
+fn published() -> Expr<Article> { Article::PUBLISHED.eq(true) }
+fn popular(q: Select<Article>) -> Select<Article> { q.filter(Article::VIEWS.gte(100)) }
+
+Article::all(&db).await?;                                // only published
+Article::query().scope(popular).all(&db).await?;         // named scope
+Article::query().unscoped().count(&db).await?;           // everything
+```
+
+### Retrying transactions
+
+```rust
+use rok_db::{Isolation, TxOptions};
+
+// Retry serialization failures and deadlocks with backoff.
+let opts = TxOptions::new().isolation(Isolation::Serializable).retries(5);
+db.transaction_with(opts, |tx| Box::pin(async move {
+    let mut a = Account::find_or_fail(&mut *tx, 1).await?;
+    a.balance -= 10;
+    a.save(&mut *tx).await?;
+    Ok::<_, rok_db::Error>(())
+})).await?;
+```
+
+### Testing
+
+With the `testing` feature, `#[rok_db::test]` gives each test a fresh database on the server
+named by `DATABASE_URL`, dropped afterwards (even on panic). Tests are skipped when
+`DATABASE_URL` isn't set.
+
+```rust
+#[rok_db::test(migrations = "migrations", sql = "tests/fixtures/seed.sql")]
+async fn lists_admins(db: Db) {
+    assert_eq!(User::filter(User::ROLE.eq(Role::Admin)).count(&db).await.unwrap(), 1);
+}
+```
+
+Needs `tokio` (with `macros`, `rt`) as a dev-dependency and a database user allowed to create
+databases.
+
 ### Transactions
 
 ```rust
@@ -292,7 +492,7 @@ let total: i64 = rok_db::raw("SELECT COUNT(*) FROM users").scalar(&db).await?;
 
 ### Errors
 
-`rok_db::Error` has helpers for the common cases: `is_not_found()`, `is_unique_violation()`, `is_foreign_key_violation()` and `constraint()`.
+`rok_db::Error` has helpers for the common cases: `is_not_found()`, `is_conflict()`, `validation_errors()`, `is_serialization_failure()`, `is_unique_violation()`, `is_foreign_key_violation()` and `constraint()`.
 
 ## Crates
 

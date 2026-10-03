@@ -16,6 +16,7 @@ chrono = ["sqlx/chrono"]
 uuid = ["sqlx/uuid"]
 json = ["sqlx/json", "dep:serde", "dep:serde_json"]
 migrate = ["sqlx/migrate"]
+testing = ["tokio/rt"]
 
 [dependencies]
 sqlx = { workspace = true }
@@ -23,6 +24,7 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 async-stream = "0.3"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["time"] }
 thiserror = "2"
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }

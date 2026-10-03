@@ -106,6 +106,79 @@ impl Db {
         }
     }
 
+    /// Run `f` in a transaction configured by `options`, retrying the whole
+    /// closure when PostgreSQL aborts it with a serialization failure or a
+    /// deadlock (SQLSTATE `40001` / `40P01`), up to `options.retries` times.
+    ///
+    /// The closure may run more than once, so it must be `Fn` and should not
+    /// have side effects outside the database.
+    ///
+    /// ```ignore
+    /// let opts = TxOptions::new().isolation(Isolation::Serializable).retries(5);
+    /// db.transaction_with(opts, |tx| Box::pin(async move {
+    ///     let mut from = Account::find_or_fail(&mut *tx, 1).await?;
+    ///     let mut to = Account::find_or_fail(&mut *tx, 2).await?;
+    ///     from.balance -= 10;
+    ///     to.balance += 10;
+    ///     from.save(&mut *tx).await?;
+    ///     to.save(&mut *tx).await?;
+    ///     Ok::<_, rok_db::Error>(())
+    /// })).await?;
+    /// ```
+    pub async fn transaction_with<T, E, F>(
+        &self,
+        options: TxOptions,
+        f: F,
+    ) -> std::result::Result<T, E>
+    where
+        F: for<'t> Fn(&'t mut Tx) -> BoxFuture<'t, std::result::Result<T, E>>,
+        E: From<Error> + Retryable,
+    {
+        let mut attempt = 0;
+        loop {
+            let result = self.try_transaction(&options, &f).await;
+            match result {
+                Err(err) if attempt < options.retries && err.is_retryable() => {
+                    attempt += 1;
+                    let delay = options.backoff(attempt);
+                    tracing::debug!(target: "rok_db::query", attempt, delay_ms = delay.as_millis() as u64, "retrying transaction");
+                    tokio::time::sleep(delay).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn try_transaction<T, E, F>(
+        &self,
+        options: &TxOptions,
+        f: &F,
+    ) -> std::result::Result<T, E>
+    where
+        F: for<'t> Fn(&'t mut Tx) -> BoxFuture<'t, std::result::Result<T, E>>,
+        E: From<Error>,
+    {
+        let mut tx = self.begin().await?;
+        if let Some(sql) = options.set_transaction_sql() {
+            sqlx::query(&sql)
+                .execute(&mut *tx.inner)
+                .await
+                .map_err(Error::from)?;
+        }
+        match f(&mut tx).await {
+            Ok(value) => {
+                tx.commit().await?;
+                Ok(value)
+            }
+            Err(err) => {
+                // The transaction may already be aborted; a failed rollback
+                // must not hide the original error.
+                let _ = tx.rollback().await;
+                Err(err)
+            }
+        }
+    }
+
     /// Execute one or more raw SQL statements without parameters (e.g. a
     /// schema script) and return the total number of affected rows.
     pub async fn execute(&self, sql: &str) -> Result<u64> {
@@ -149,6 +222,113 @@ impl fmt::Debug for Db {
             .field("idle", &self.pool.num_idle())
             .field("cache", &self.ctx.cache)
             .finish()
+    }
+}
+
+/// Transaction isolation level, see [`TxOptions::isolation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isolation {
+    /// `READ COMMITTED` (PostgreSQL's default).
+    ReadCommitted,
+    /// `REPEATABLE READ`.
+    RepeatableRead,
+    /// `SERIALIZABLE`: transactions behave as if run one after another;
+    /// conflicting ones fail with a serialization error (and are retried by
+    /// [`Db::transaction_with`]).
+    Serializable,
+}
+
+/// Settings for [`Db::transaction_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxOptions {
+    isolation: Option<Isolation>,
+    read_only: bool,
+    retries: u32,
+    base_delay: Duration,
+}
+
+impl Default for TxOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TxOptions {
+    /// Default settings: the server's isolation level, read-write, no retries.
+    pub fn new() -> Self {
+        Self {
+            isolation: None,
+            read_only: false,
+            retries: 0,
+            base_delay: Duration::from_millis(10),
+        }
+    }
+
+    /// Run with this isolation level.
+    pub fn isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = Some(isolation);
+        self
+    }
+
+    /// Run as `READ ONLY`.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    /// Retry up to `retries` times on serialization failures and deadlocks.
+    pub fn retries(mut self, retries: u32) -> Self {
+        self.retries = retries;
+        self
+    }
+
+    /// Base delay of the exponential backoff between retries (default 10ms;
+    /// attempt *n* waits `base * 2^(n-1)` plus up to 50% jitter, capped at 1s).
+    pub fn backoff_base(mut self, delay: Duration) -> Self {
+        self.base_delay = delay;
+        self
+    }
+
+    fn backoff(&self, attempt: u32) -> Duration {
+        let exp = self
+            .base_delay
+            .saturating_mul(1 << attempt.saturating_sub(1).min(16))
+            .min(Duration::from_secs(1));
+        // Cheap jitter without a RNG dependency.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        exp + exp.mul_f64(f64::from(nanos % 500) / 1000.0)
+    }
+
+    fn set_transaction_sql(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(isolation) = self.isolation {
+            parts.push(match isolation {
+                Isolation::ReadCommitted => "ISOLATION LEVEL READ COMMITTED",
+                Isolation::RepeatableRead => "ISOLATION LEVEL REPEATABLE READ",
+                Isolation::Serializable => "ISOLATION LEVEL SERIALIZABLE",
+            });
+        }
+        if self.read_only {
+            parts.push("READ ONLY");
+        }
+        (!parts.is_empty()).then(|| format!("SET TRANSACTION {}", parts.join(", ")))
+    }
+}
+
+/// Errors that can tell whether retrying the transaction might succeed.
+/// Implemented for [`Error`]; implement it for your own error type (usually
+/// by delegating to a wrapped `rok_db::Error`) to use it with
+/// [`Db::transaction_with`].
+pub trait Retryable {
+    /// `true` for serialization failures and deadlocks.
+    fn is_retryable(&self) -> bool;
+}
+
+impl Retryable for Error {
+    fn is_retryable(&self) -> bool {
+        self.is_serialization_failure()
     }
 }
 
