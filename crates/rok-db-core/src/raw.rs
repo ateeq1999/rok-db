@@ -26,6 +26,7 @@ pub fn raw(sql: impl Into<String>) -> Raw {
         sql: sql.into(),
         params: Vec::new(),
         writes: Vec::new(),
+        replica: false,
     }
 }
 
@@ -35,12 +36,21 @@ pub struct Raw {
     sql: String,
     params: Vec<Value>,
     writes: Vec<&'static str>,
+    replica: bool,
 }
 
 impl Raw {
     /// Bind the next parameter.
     pub fn bind(mut self, value: impl Into<Value>) -> Self {
         self.params.push(value.into());
+        self
+    }
+
+    /// Allow this read-only statement to run on a read replica. Raw SQL
+    /// runs on the primary by default, since rok-db can't tell whether it
+    /// writes.
+    pub fn on_replica(mut self) -> Self {
+        self.replica = true;
         self
     }
 
@@ -65,7 +75,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_all(executor, &self.to_sql(), &self.writes).await
+        exec::fetch_all(executor, &self.to_sql(), &self.writes, self.replica).await
     }
 
     /// Fetch at most one row.
@@ -74,7 +84,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_optional(executor, &self.to_sql(), &self.writes).await
+        exec::fetch_optional(executor, &self.to_sql(), &self.writes, self.replica).await
     }
 
     /// Fetch exactly one row.
@@ -83,7 +93,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_optional(executor, &self.to_sql(), &self.writes)
+        exec::fetch_optional(executor, &self.to_sql(), &self.writes, self.replica)
             .await?
             .ok_or_else(|| sqlx::Error::RowNotFound.into())
     }
@@ -94,7 +104,7 @@ impl Raw {
         T: Type<Postgres> + for<'r> Decode<'r, Postgres> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_scalar(executor, &self.to_sql()).await
+        exec::fetch_scalar(executor, &self.to_sql(), self.replica).await
     }
 
     /// Stream rows one at a time.
@@ -103,7 +113,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin + 'e,
         E: Executor<'e> + 'e,
     {
-        exec::stream(executor, self.to_sql())
+        exec::stream(executor, self.to_sql(), self.replica)
     }
 
     /// Execute the statement and return the number of affected rows.

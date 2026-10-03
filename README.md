@@ -492,6 +492,68 @@ StatsD, OpenTelemetry…) and rok-db reports `rok_db_queries_total{kind,outcome}
 `rok_db_cache_requests_total{result}` and, via `db.record_pool_metrics()`,
 `rok_db_pool_connections{state}`. `db.stats()` gives a pool snapshot without the feature.
 
+### PostgreSQL arrays, JSONB and full-text search
+
+```rust
+#[derive(Model)]
+struct Doc { id: i64, body: String, tags: Vec<String>, prefs: serde_json::Value }
+
+Doc::filter(Doc::TAGS.array_has("rust"));                         // $1 = ANY(tags)
+Doc::filter(Doc::TAGS.array_overlaps(vec!["db".to_string()]));    // tags && $1
+Doc::filter(Doc::ID.eq_any(ids));                                  // id = ANY($1): one parameter for any number of ids
+
+Doc::filter(Doc::PREFS.json_has_key("theme"));                     // prefs ? $1
+Doc::filter(Doc::PREFS.json_contains(json!({"theme": "dark"})));   // prefs @> $1   (feature `json`)
+Doc::filter(Doc::PREFS.json_text("lang").eq("en"));                // prefs ->> 'lang' = $1
+Doc::filter(Doc::PREFS.json_path_text(["notify", "email"]).eq("true"));
+
+Doc::filter(Doc::BODY.search_in("english", "\"query builder\" -java"))   // websearch syntax
+    .order_by(Doc::BODY.search_rank("query builder").desc())               // order by an expression
+    .paginate(&db, 1, 20)
+    .await?;
+```
+
+`Vec<T>` fields map to PostgreSQL arrays for `String`, `bool`, integers, floats and (with the
+features) `Uuid` and dates.
+
+### Read replicas
+
+```rust
+let db = Db::builder()
+    .read_replica("postgres://replica-1/app")
+    .read_replica("postgres://replica-2/app")
+    .connect("postgres://primary/app")
+    .await?;
+
+User::all(&db).await?;                          // round-robin over replicas
+User::query().on_primary().all(&db).await?;     // read your own writes
+User::all(&db.primary()).await?;                // a handle that never uses replicas
+```
+
+Only the query builder's plain reads use replicas. Writes, `for_update`/`for_share`, transactions and
+raw SQL (unless `.on_replica()`) go to the primary, and a read whose replica is unreachable is retried
+on the primary.
+
+### Change notifications (LISTEN/NOTIFY)
+
+```rust
+let mut listener = db.listen(&["jobs"]).await?;
+db.notify("jobs", "resize:42").await?;
+let n = listener.recv().await?;                 // n.channel, n.payload
+
+User::install_change_notifications(&db).await?; // once: an AFTER trigger on `users`
+let mut changes = User::changes(&db).await?;
+while let Ok(change) = changes.recv().await {
+    match change.op {
+        ChangeOp::Insert | ChangeOp::Update => { let user = change.fetch(&db).await?; }
+        ChangeOp::Delete => { /* change.key is the primary key, as text */ }
+    }
+}
+```
+
+Notifications arrive on commit, at most once, and only to connected listeners: great for cache
+busting, websockets and waking workers, not a durable event log.
+
 ### Retrying transactions
 
 ```rust

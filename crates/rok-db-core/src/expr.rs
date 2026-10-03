@@ -191,6 +191,127 @@ impl<M> Column<M> {
         })
     }
 
+    // ----- PostgreSQL: arrays ------------------------------------------------
+
+    /// `column = ANY($1)` with a single array parameter — like
+    /// [`is_in`](Self::is_in), but one parameter however many values, so it
+    /// suits very large lists.
+    pub fn eq_any<T>(self, values: impl IntoIterator<Item = T>) -> Expr<M>
+    where
+        Vec<T>: Into<Value>,
+    {
+        let values: Vec<T> = values.into_iter().collect();
+        Expr::raw(format!("{} = ANY(?)", quoted(self.name)), [values.into()])
+    }
+
+    /// Array column contains every element of `values` (`column @> $1`).
+    pub fn array_contains(self, values: impl Into<Value>) -> Expr<M> {
+        self.cmp("@>", values)
+    }
+
+    /// Array column shares at least one element with `values` (`column && $1`).
+    pub fn array_overlaps(self, values: impl Into<Value>) -> Expr<M> {
+        self.cmp("&&", values)
+    }
+
+    /// Array column contains `value` (`$1 = ANY(column)`).
+    pub fn array_has(self, value: impl Into<Value>) -> Expr<M> {
+        Expr::raw(format!("? = ANY({})", quoted(self.name)), [value.into()])
+    }
+
+    // ----- PostgreSQL: JSONB -------------------------------------------------
+
+    /// JSONB column has the top-level key `key` (`column ? $1`).
+    pub fn json_has_key(self, key: &str) -> Expr<M> {
+        self.cmp("?", key)
+    }
+
+    /// JSONB column has any of `keys` (`column ?| $1`).
+    pub fn json_has_any_key<K: Into<String>>(self, keys: impl IntoIterator<Item = K>) -> Expr<M> {
+        let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        self.cmp("?|", keys)
+    }
+
+    /// JSONB column has all of `keys` (`column ?& $1`).
+    pub fn json_has_all_keys<K: Into<String>>(self, keys: impl IntoIterator<Item = K>) -> Expr<M> {
+        let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        self.cmp("?&", keys)
+    }
+
+    /// JSONB column contains `json` (`column @> $1`), e.g.
+    /// `User::PREFS.json_contains(json!({"theme": "dark"}))`.
+    #[cfg(feature = "json")]
+    pub fn json_contains(self, json: serde_json::Value) -> Expr<M> {
+        self.cmp("@>", json)
+    }
+
+    /// The text value at `key` of a JSON/JSONB column (`column ->> $1`), to
+    /// filter, select or order by: `User::PREFS.json_text("theme").eq("dark")`.
+    pub fn json_text(self, key: &str) -> Projection<M> {
+        Projection::raw(format!("{} ->> ?", quoted(self.name)), [key])
+    }
+
+    /// The text value at a nested path (`column #>> $1`):
+    /// `Event::DATA.json_path_text(["user", "id"])`.
+    pub fn json_path_text<K: Into<String>>(
+        self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Projection<M> {
+        let path: Vec<String> = path.into_iter().map(Into::into).collect();
+        Projection::raw(format!("{} #>> ?", quoted(self.name)), [path])
+    }
+
+    // ----- PostgreSQL: full-text search ----------------------------------------
+
+    /// Full-text search on a text column with the server's default text
+    /// search configuration:
+    /// `to_tsvector(column) @@ websearch_to_tsquery($1)`.
+    ///
+    /// `query` uses web-search syntax: `rust -java "query builder" or orm`.
+    /// For speed, index `to_tsvector(column)` or use a generated `tsvector`
+    /// column with [`ts_matches`](Self::ts_matches).
+    pub fn search(self, query: &str) -> Expr<M> {
+        Expr::raw(
+            format!(
+                "to_tsvector({}) @@ websearch_to_tsquery(?)",
+                quoted(self.name)
+            ),
+            [query],
+        )
+    }
+
+    /// [`search`](Self::search) with an explicit configuration such as
+    /// `"english"` (enables stemming and stop words).
+    pub fn search_in(self, config: &str, query: &str) -> Expr<M> {
+        Expr::raw(
+            format!(
+                "to_tsvector(?::regconfig, {}) @@ websearch_to_tsquery(?::regconfig, ?)",
+                quoted(self.name)
+            ),
+            [config, config, query],
+        )
+    }
+
+    /// Match a `tsvector` column: `column @@ websearch_to_tsquery($1)`.
+    pub fn ts_matches(self, query: &str) -> Expr<M> {
+        Expr::raw(
+            format!("{} @@ websearch_to_tsquery(?)", quoted(self.name)),
+            [query],
+        )
+    }
+
+    /// Relevance of a text column for `query`, to order results:
+    /// `.order_by(Post::BODY.search_rank("rust orm").desc())`.
+    pub fn search_rank(self, query: &str) -> Projection<M> {
+        Projection::raw(
+            format!(
+                "ts_rank(to_tsvector({}), websearch_to_tsquery(?))",
+                quoted(self.name)
+            ),
+            [query],
+        )
+    }
+
     /// `COUNT(column)` — number of non-`NULL` values.
     pub fn count(self) -> Projection<M> {
         Projection::func("COUNT", Some(self.name), false)
@@ -253,6 +374,12 @@ impl<M> fmt::Display for Column<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name)
     }
+}
+
+fn quoted(ident: &str) -> String {
+    let mut s = String::new();
+    crate::sql::push_ident(&mut s, ident);
+    s
 }
 
 fn escape_like(text: &str) -> String {
@@ -675,6 +802,16 @@ impl<M> Projection<M> {
         self.cmp("<=", value)
     }
 
+    /// Ascending ordering by this expression, e.g. a search rank.
+    pub fn asc(self) -> Order<M> {
+        Order::with_target(OrderTarget::Term(self.term), Direction::Asc)
+    }
+
+    /// Descending ordering by this expression.
+    pub fn desc(self) -> Order<M> {
+        Order::with_target(OrderTarget::Term(self.term), Direction::Desc)
+    }
+
     pub(crate) fn write(&self, sql: &mut Sql) {
         self.term.write(sql);
         if let Some(alias) = self.alias {
@@ -776,19 +913,38 @@ pub enum Direction {
 
 /// An `ORDER BY` term on model `M`, created with [`Column::asc`] or [`Column::desc`].
 pub struct Order<M> {
-    pub(crate) column: &'static str,
+    pub(crate) target: OrderTarget,
     pub(crate) direction: Direction,
     pub(crate) nulls: Option<bool>,
     _model: PhantomData<fn() -> M>,
 }
 
+/// What an `ORDER BY` term sorts by.
+#[derive(Debug, Clone)]
+pub(crate) enum OrderTarget {
+    Column(&'static str),
+    Term(Term),
+}
+
 impl<M> Order<M> {
-    fn new(column: &'static str, direction: Direction) -> Self {
+    pub(crate) fn new(column: &'static str, direction: Direction) -> Self {
+        Self::with_target(OrderTarget::Column(column), direction)
+    }
+
+    fn with_target(target: OrderTarget, direction: Direction) -> Self {
         Self {
-            column,
+            target,
             direction,
             nulls: None,
             _model: PhantomData,
+        }
+    }
+
+    /// The column, if this orders by a plain column.
+    pub(crate) fn column(&self) -> Option<&'static str> {
+        match self.target {
+            OrderTarget::Column(c) => Some(c),
+            OrderTarget::Term(_) => None,
         }
     }
 
@@ -804,8 +960,22 @@ impl<M> Order<M> {
         self
     }
 
-    pub(crate) fn write(&self, sql: &mut Sql) {
-        sql.push_ident(self.column).push(match self.direction {
+    /// Write the sort key: the column or expression, or `alias` instead of an
+    /// expression (used when the expression was selected under that alias).
+    pub(crate) fn write_key(&self, sql: &mut Sql, prefix: &str, alias: Option<&str>) {
+        match (&self.target, alias) {
+            (OrderTarget::Column(c), _) => {
+                sql.push(prefix).push_ident(c);
+            }
+            (OrderTarget::Term(_), Some(alias)) => {
+                sql.push(prefix).push_ident(alias);
+            }
+            (OrderTarget::Term(term), None) => term.write(sql),
+        }
+    }
+
+    pub(crate) fn write_direction(&self, sql: &mut Sql) {
+        sql.push(match self.direction {
             Direction::Asc => " ASC",
             Direction::Desc => " DESC",
         });
@@ -815,12 +985,17 @@ impl<M> Order<M> {
             None => sql,
         };
     }
+
+    pub(crate) fn write(&self, sql: &mut Sql) {
+        self.write_key(sql, "", None);
+        self.write_direction(sql);
+    }
 }
 
 impl<M> Clone for Order<M> {
     fn clone(&self) -> Self {
         Self {
-            column: self.column,
+            target: self.target.clone(),
             direction: self.direction,
             nulls: self.nulls,
             _model: PhantomData,
@@ -830,11 +1005,9 @@ impl<M> Clone for Order<M> {
 
 impl<M> fmt::Debug for Order<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Order")
-            .field("column", &self.column)
-            .field("direction", &self.direction)
-            .field("nulls_first", &self.nulls)
-            .finish()
+        let mut sql = Sql::new();
+        self.write(&mut sql);
+        f.debug_tuple("Order").field(&sql.as_str()).finish()
     }
 }
 

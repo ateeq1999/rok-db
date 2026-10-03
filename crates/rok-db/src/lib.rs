@@ -93,6 +93,14 @@
 //! - **Bulk loading**: [`Model::copy_in`] with binary `COPY`.
 //! - **Web & metrics**: the [`web`] module (`serde`, `axum` features) and
 //!   [`metrics`] (`metrics` feature).
+//! - **PostgreSQL types**: arrays (`Vec<T>` fields, [`Column::array_has`],
+//!   [`Column::eq_any`]), JSONB ([`Column::json_text`],
+//!   [`Column::json_has_key`]) and full-text search ([`Column::search`],
+//!   [`Column::search_rank`]).
+//! - **Read replicas**: [`DbBuilder::read_replica`], [`Select::on_primary`],
+//!   [`Db::primary`].
+//! - **LISTEN/NOTIFY**: [`Db::listen`], [`Db::notify`] and model change
+//!   feeds ([`Model::changes`], see [`notify`]).
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`

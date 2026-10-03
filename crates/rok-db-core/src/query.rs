@@ -73,6 +73,7 @@ pub struct Select<M> {
     lock: Option<Lock>,
     trashed: Trashed,
     scoped: bool,
+    primary: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -95,6 +96,7 @@ impl<M: Model> Select<M> {
             lock: None,
             trashed: Trashed::Exclude,
             scoped: true,
+            primary: false,
             _model: PhantomData,
         }
     }
@@ -103,6 +105,19 @@ impl<M: Model> Select<M> {
     pub fn filter(mut self, expr: Expr<M>) -> Self {
         self.filters.push(expr.cond);
         self
+    }
+
+    /// Run on the primary even when read replicas are configured, e.g. to
+    /// read your own writes without replication lag.
+    pub fn on_primary(mut self) -> Self {
+        self.primary = true;
+        self
+    }
+
+    /// Whether this read may go to a replica: not forced to the primary and
+    /// not locking rows.
+    pub(crate) fn use_replica(&self) -> bool {
+        !self.primary && self.lock.is_none()
     }
 
     /// Apply a reusable query fragment ("named scope"):
@@ -281,12 +296,15 @@ impl<M: Model> Select<M> {
         self.write_tail(sql);
     }
 
+    /// `ORDER BY …`; with a `prefix` (the outer query of `paginate`),
+    /// expression orders refer to their `__rok_o{i}` aliases.
     fn write_order(&self, sql: &mut Sql, prefix: &str) {
         if !self.order.is_empty() {
             sql.push(" ORDER BY ")
-                .push_list(&self.order, ", ", |sql, o| {
-                    sql.push(prefix);
-                    o.write(sql);
+                .push_list(self.order.iter().enumerate(), ", ", |sql, (i, o)| {
+                    let alias = (!prefix.is_empty()).then(|| format!("__rok_o{i}"));
+                    o.write_key(sql, prefix, alias.as_deref());
+                    o.write_direction(sql);
                 });
         }
     }
@@ -316,12 +334,13 @@ impl<M: Model> Select<M> {
 
     /// Fetch every matching row.
     pub async fn all<'e, E: Executor<'e>>(self, executor: E) -> Result<Vec<M>> {
-        exec::fetch_all(executor, &self.to_sql(), &[]).await
+        exec::fetch_all(executor, &self.to_sql(), &[], self.use_replica()).await
     }
 
     /// Fetch the first matching row, or `None`.
     pub async fn first<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
-        exec::fetch_optional(executor, &self.limit(1).to_sql(), &[]).await
+        let replica = self.use_replica();
+        exec::fetch_optional(executor, &self.limit(1).to_sql(), &[], replica).await
     }
 
     /// Fetch the first matching row, failing with [`Error::NotFound`].
@@ -342,17 +361,18 @@ impl<M: Model> Select<M> {
     /// }
     /// ```
     pub fn stream<'e, E: Executor<'e> + 'e>(self, executor: E) -> BoxStream<'e, Result<M>> {
-        exec::stream(executor, self.to_sql())
+        let replica = self.use_replica();
+        exec::stream(executor, self.to_sql(), replica)
     }
 
     /// Count the matching rows (ignores ordering, limit and offset).
     pub async fn count<'e, E: Executor<'e>>(self, executor: E) -> Result<i64> {
-        exec::fetch_scalar(executor, &self.count_sql()).await
+        exec::fetch_scalar(executor, &self.count_sql(), self.use_replica()).await
     }
 
     /// `true` if at least one row matches.
     pub async fn exists<'e, E: Executor<'e>>(self, executor: E) -> Result<bool> {
-        exec::fetch_scalar(executor, &self.exists_sql()).await
+        exec::fetch_scalar(executor, &self.exists_sql(), self.use_replica()).await
     }
 
     /// `SUM(column)` over the matching rows as `BIGINT` (`None` when no
@@ -364,7 +384,7 @@ impl<M: Model> Select<M> {
         column: Column<M>,
     ) -> Result<Option<i64>> {
         let sql = self.aggregate_sql(column.sum().cast("BIGINT"));
-        exec::fetch_scalar(executor, &sql).await
+        exec::fetch_scalar(executor, &sql, self.use_replica()).await
     }
 
     /// `AVG(column)` over the matching rows as `DOUBLE PRECISION`.
@@ -374,7 +394,7 @@ impl<M: Model> Select<M> {
         column: Column<M>,
     ) -> Result<Option<f64>> {
         let sql = self.aggregate_sql(column.avg().cast("DOUBLE PRECISION"));
-        exec::fetch_scalar(executor, &sql).await
+        exec::fetch_scalar(executor, &sql, self.use_replica()).await
     }
 
     /// `MIN(column)` over the matching rows.
@@ -383,7 +403,12 @@ impl<M: Model> Select<M> {
         T: Type<Postgres> + for<'r> Decode<'r, Postgres> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_scalar(executor, &self.aggregate_sql(column.min())).await
+        exec::fetch_scalar(
+            executor,
+            &self.aggregate_sql(column.min()),
+            self.use_replica(),
+        )
+        .await
     }
 
     /// `MAX(column)` over the matching rows.
@@ -392,7 +417,12 @@ impl<M: Model> Select<M> {
         T: Type<Postgres> + for<'r> Decode<'r, Postgres> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_scalar(executor, &self.aggregate_sql(column.max())).await
+        exec::fetch_scalar(
+            executor,
+            &self.aggregate_sql(column.max()),
+            self.use_replica(),
+        )
+        .await
     }
 
     /// Fetch one page of results together with the total number of matches,
@@ -409,7 +439,13 @@ impl<M: Model> Select<M> {
             ));
         }
         let page = page.max(1);
-        let rows = exec::fetch_rows(executor, &self.paginate_sql(page, per_page), &[]).await?;
+        let rows = exec::fetch_rows(
+            executor,
+            &self.paginate_sql(page, per_page),
+            &[],
+            self.use_replica(),
+        )
+        .await?;
 
         let mut total = 0;
         let mut items = Vec::with_capacity(rows.len());
@@ -430,6 +466,14 @@ impl<M: Model> Select<M> {
         self.write_from_where(&mut sql);
         sql.push(r#") c LEFT JOIN LATERAL (SELECT TRUE AS "__rok_present", "#);
         push_columns::<M>(&mut sql);
+        // Expression orders are selected so the outer query can sort by them.
+        for (i, o) in self.order.iter().enumerate() {
+            if o.column().is_none() {
+                sql.push(", ");
+                o.write_key(&mut sql, "", None);
+                sql.push(" AS ").push_ident(&format!("__rok_o{i}"));
+            }
+        }
         self.write_from_where(&mut sql);
         self.write_order(&mut sql, "");
         let offset = (page - 1).saturating_mul(per_page);
@@ -491,7 +535,11 @@ impl<M: Model> Select<M> {
     /// The ordering used for keyset pagination: the query's `ORDER BY`
     /// columns plus the primary key as a tiebreaker.
     fn keyset_order(&self) -> Vec<(&'static str, Direction)> {
-        let mut order: Vec<_> = self.order.iter().map(|o| (o.column, o.direction)).collect();
+        let mut order: Vec<_> = self
+            .order
+            .iter()
+            .filter_map(|o| o.column().map(|c| (c, o.direction)))
+            .collect();
         if !order.iter().any(|(c, _)| *c == M::PRIMARY_KEY) {
             order.push((M::PRIMARY_KEY, Direction::Asc));
         }
@@ -549,6 +597,11 @@ impl<M: Model> Select<M> {
     }
 
     fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
+        if self.order.iter().any(|o| o.column().is_none()) {
+            return Err(Error::InvalidQuery(
+                "keyset pagination can only order by columns, not expressions".into(),
+            ));
+        }
         let order = self.keyset_order();
         let mut select = self;
         select.order = order
@@ -597,6 +650,7 @@ impl<M> Clone for Select<M> {
             lock: self.lock,
             trashed: self.trashed,
             scoped: self.scoped,
+            primary: self.primary,
             _model: PhantomData,
         }
     }
@@ -635,7 +689,7 @@ impl<M: Model> Projected<M> {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_all(executor, &self.to_sql(), &[]).await
+        exec::fetch_all(executor, &self.to_sql(), &[], self.select.use_replica()).await
     }
 
     /// Fetch the first row, or `None`.
@@ -648,7 +702,8 @@ impl<M: Model> Projected<M> {
             select: self.select.limit(1),
             items: self.items,
         };
-        exec::fetch_optional(executor, &projected.to_sql(), &[]).await
+        let replica = projected.select.use_replica();
+        exec::fetch_optional(executor, &projected.to_sql(), &[], replica).await
     }
 
     /// Fetch the first row, failing with [`Error::NotFound`].
@@ -668,7 +723,7 @@ impl<M: Model> Projected<M> {
         T: Type<Postgres> + for<'r> Decode<'r, Postgres> + Send + Unpin,
         E: Executor<'e>,
     {
-        exec::fetch_scalar(executor, &self.to_sql()).await
+        exec::fetch_scalar(executor, &self.to_sql(), self.select.use_replica()).await
     }
 
     /// Stream rows one at a time.
@@ -677,7 +732,8 @@ impl<M: Model> Projected<M> {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin + 'e,
         E: Executor<'e> + 'e,
     {
-        exec::stream(executor, self.to_sql())
+        let replica = self.select.use_replica();
+        exec::stream(executor, self.to_sql(), replica)
     }
 }
 
@@ -735,15 +791,18 @@ impl<M: Model + Clone> Memoized<M> {
     /// Fetch every matching row, from the cache when possible.
     pub async fn all<'e, E: Executor<'e>>(self, executor: E) -> Result<Vec<M>> {
         let sql = self.select.to_sql();
-        self.cached(executor, "all", &sql, |e| exec::fetch_all(e, &sql, &[]))
-            .await
+        let replica = self.select.use_replica();
+        self.cached(executor, "all", &sql, |e| {
+            exec::fetch_all(e, &sql, &[], replica)
+        })
+        .await
     }
 
     /// Fetch the first matching row, from the cache when possible.
     pub async fn first<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
         let sql = self.select.clone().limit(1).to_sql();
         self.cached(executor, "first", &sql, |e| {
-            exec::fetch_optional(e, &sql, &[])
+            exec::fetch_optional(e, &sql, &[], self.select.use_replica())
         })
         .await
     }
@@ -758,15 +817,21 @@ impl<M: Model + Clone> Memoized<M> {
     /// Count the matching rows, from the cache when possible.
     pub async fn count<'e, E: Executor<'e>>(self, executor: E) -> Result<i64> {
         let sql = self.select.count_sql();
-        self.cached(executor, "count", &sql, |e| exec::fetch_scalar(e, &sql))
-            .await
+        let replica = self.select.use_replica();
+        self.cached(executor, "count", &sql, |e| {
+            exec::fetch_scalar(e, &sql, replica)
+        })
+        .await
     }
 
     /// `true` if at least one row matches, from the cache when possible.
     pub async fn exists<'e, E: Executor<'e>>(self, executor: E) -> Result<bool> {
         let sql = self.select.exists_sql();
-        self.cached(executor, "exists", &sql, |e| exec::fetch_scalar(e, &sql))
-            .await
+        let replica = self.select.use_replica();
+        self.cached(executor, "exists", &sql, |e| {
+            exec::fetch_scalar(e, &sql, replica)
+        })
+        .await
     }
 
     /// Fetch one page, from the cache when possible.
@@ -960,13 +1025,13 @@ impl<M: Model> Update<M> {
         self.check()?;
         let mut sql = self.to_sql();
         push_returning::<M>(&mut sql);
-        exec::fetch_all(executor, &sql, &[M::TABLE]).await
+        exec::fetch_all(executor, &sql, &[M::TABLE], false).await
     }
 
     pub(crate) async fn returning_one<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
         let mut sql = self.to_sql();
         push_returning::<M>(&mut sql);
-        exec::fetch_optional(executor, &sql, &[M::TABLE]).await
+        exec::fetch_optional(executor, &sql, &[M::TABLE], false).await
     }
 }
 
@@ -1258,7 +1323,7 @@ impl<M: Model> Insert<M> {
     /// Run the insert and return the stored row, or `None` if it was
     /// skipped by `ON CONFLICT … DO NOTHING`.
     pub async fn exec_optional<'e, E: Executor<'e>>(self, executor: E) -> Result<Option<M>> {
-        exec::fetch_optional(executor, &self.build(true)?, &[M::TABLE]).await
+        exec::fetch_optional(executor, &self.build(true)?, &[M::TABLE], false).await
     }
 }
 
@@ -1323,7 +1388,7 @@ impl<'a, M: Model> InsertMany<'a, M> {
         for record in self.records {
             crate::model::pre_insert(record)?;
         }
-        let rows: Vec<M> = exec::fetch_all(executor, &self.build()?, &[M::TABLE]).await?;
+        let rows: Vec<M> = exec::fetch_all(executor, &self.build()?, &[M::TABLE], false).await?;
         for row in &rows {
             row.after_insert()?;
         }

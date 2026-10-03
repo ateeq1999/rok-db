@@ -273,6 +273,39 @@ macro_rules! impl_value {
     )+};
 }
 
+/// PostgreSQL arrays (`TEXT[]`, `BIGINT[]`, …) as column values.
+macro_rules! impl_array {
+    ($($t:ty),* $(,)?) => {$(
+        impl CustomType for Vec<$t> {}
+        impl From<Vec<$t>> for Value {
+            fn from(v: Vec<$t>) -> Self {
+                Value::custom(Some(v))
+            }
+        }
+        impl From<&Vec<$t>> for Value {
+            fn from(v: &Vec<$t>) -> Self {
+                Value::custom(Some(v.clone()))
+            }
+        }
+        impl From<&[$t]> for Value {
+            fn from(v: &[$t]) -> Self {
+                Value::custom(Some(v.to_vec()))
+            }
+        }
+    )*};
+}
+
+impl_array!(String, bool, i16, i32, i64, f32, f64);
+
+#[cfg(feature = "uuid")]
+impl_array!(sqlx::types::Uuid);
+
+#[cfg(feature = "chrono")]
+impl_array!(
+    sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>,
+    sqlx::types::chrono::NaiveDate,
+);
+
 macro_rules! impl_from {
     ($($variant:ident => $ty:ty),* $(,)?) => {$(
         impl From<$ty> for Value {
@@ -326,6 +359,13 @@ impl<T: serde::Serialize> From<sqlx::types::Json<T>> for Value {
 impl<T: serde::Serialize> From<&sqlx::types::Json<T>> for Value {
     fn from(v: &sqlx::types::Json<T>) -> Self {
         Value::Json(serde_json::to_value(&v.0).ok())
+    }
+}
+
+#[cfg(feature = "json")]
+impl<T: serde::Serialize> From<&Option<sqlx::types::Json<T>>> for Value {
+    fn from(v: &Option<sqlx::types::Json<T>>) -> Self {
+        Value::Json(v.as_ref().and_then(|v| serde_json::to_value(&v.0).ok()))
     }
 }
 

@@ -264,6 +264,39 @@ pub trait Model:
         crate::Tracked::new(self)
     }
 
+    /// Install (or replace) an `AFTER INSERT OR UPDATE OR DELETE` trigger
+    /// that announces every row change of this table, for
+    /// [`changes`](Model::changes). Run it once, e.g. from a migration or at
+    /// startup (PostgreSQL 11+).
+    fn install_change_notifications(db: &crate::Db) -> impl Future<Output = Result<()>> + Send {
+        let sql = crate::notify::install_sql::<Self>();
+        async move {
+            db.execute(&sql?).await?;
+            Ok(())
+        }
+    }
+
+    /// Remove the trigger installed by
+    /// [`install_change_notifications`](Model::install_change_notifications).
+    fn uninstall_change_notifications(db: &crate::Db) -> impl Future<Output = Result<()>> + Send {
+        let sql = crate::notify::uninstall_sql::<Self>();
+        async move {
+            db.execute(&sql).await?;
+            Ok(())
+        }
+    }
+
+    /// Subscribe to row changes of this table (see
+    /// [`install_change_notifications`](Model::install_change_notifications)).
+    fn changes(
+        db: &crate::Db,
+    ) -> impl Future<Output = Result<crate::notify::ChangeStream<Self>>> + Send {
+        async move {
+            let listener = db.listen(&[&crate::notify::channel::<Self>()]).await?;
+            Ok(crate::notify::ChangeStream::new(listener))
+        }
+    }
+
     /// `true` if this record has been soft-deleted.
     fn is_trashed(&self) -> bool {
         Self::DELETED_AT_COLUMN
@@ -282,7 +315,7 @@ pub trait Model:
         let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
         async move {
             pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -340,7 +373,7 @@ pub trait Model:
         let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
         async move {
             pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -374,7 +407,7 @@ pub trait Model:
         let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
         async move {
             pre?;
-            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
             row.after_insert()?;
@@ -592,7 +625,7 @@ async fn checked_write<'e, M: Model, E: Executor<'e>>(
     exists.write_exists_body(&mut sql);
     sql.push(r#") AS "__rok_exists", "w".* FROM (SELECT 1) AS "__rok_d" LEFT JOIN "__rok_w" AS "w" ON TRUE"#);
 
-    let rows = exec::fetch_rows(executor, &sql, &[M::TABLE]).await?;
+    let rows = exec::fetch_rows(executor, &sql, &[M::TABLE], false).await?;
     let row = rows
         .first()
         .ok_or_else(|| Error::not_found::<M>(Some(key.clone())))?;

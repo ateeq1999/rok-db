@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PostgreSQL arrays: `Vec<T>` column values (text, bool, integers,
+  floats, and uuid/date types with their features) and the operators
+  `array_has`, `array_contains`, `array_overlaps` and `eq_any`.
+- JSONB: `json_has_key`, `json_has_any_key`, `json_has_all_keys`,
+  `json_contains` (feature `json`), `json_text` and `json_path_text`.
+- Full-text search: `search`, `search_in` (explicit configuration),
+  `ts_matches` and `search_rank`; `Projection::asc`/`desc` to order by
+  expressions, including in offset pagination.
+- Read replicas: `DbBuilder::read_replica` / `replica_pool`, round-robin
+  routing of query-builder reads with fallback to the primary,
+  `Select::on_primary`, `Raw::on_replica`, `Db::primary` and
+  `Db::replica_count`.
+- LISTEN/NOTIFY: `Db::listen` (`Listener`), `Db::notify`, and model change
+  feeds with `Model::install_change_notifications`, `Model::changes`
+  (`ChangeStream`, `Change`, `ChangeOp`) and
+  `Model::uninstall_change_notifications`.
+
 - Change tracking: `Model::track` returns a `Tracked<M>` whose `save` writes
   only changed columns (or nothing); `changes`, `is_dirty`, `is_changed`,
   `mark_clean`. `Model::save_only` updates selected columns.
@@ -99,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Order` can target expressions; keyset pagination rejects expression
+  orders with `Error::InvalidQuery`.
 - `Executor` is now a rok-db trait (implemented for `&Db`, `&mut Tx`,
   `&PgPool`, `&mut PgConnection` and `&mut PgListener`) so executors can
   carry pool settings such as the query cache.

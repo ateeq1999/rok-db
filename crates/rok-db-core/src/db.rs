@@ -53,6 +53,22 @@ impl Db {
         }
     }
 
+    /// A handle to the same pool and settings that never uses read replicas,
+    /// for reads that must see the latest writes.
+    pub fn primary(&self) -> Db {
+        let mut ctx = (*self.ctx).clone();
+        ctx.replicas.clear();
+        Db {
+            pool: self.pool.clone(),
+            ctx: Arc::new(ctx),
+        }
+    }
+
+    /// Number of configured read replicas.
+    pub fn replica_count(&self) -> usize {
+        self.ctx.replicas.len()
+    }
+
     /// A snapshot of the connection pool's state.
     pub fn stats(&self) -> PoolStats {
         PoolStats {
@@ -220,9 +236,12 @@ impl Db {
         Ok(())
     }
 
-    /// Close every connection in the pool.
+    /// Close every connection in the pool and its replicas.
     pub async fn close(&self) {
         self.pool.close().await;
+        for replica in &self.ctx.replicas {
+            replica.close().await;
+        }
     }
 }
 
@@ -365,6 +384,7 @@ impl Retryable for Error {
 pub struct DbBuilder {
     options: PgPoolOptions,
     ctx: Context,
+    replica_urls: Vec<String>,
 }
 
 impl DbBuilder {
@@ -379,6 +399,26 @@ impl DbBuilder {
     /// Use an existing [`QueryCache`], e.g. one shared by several pools.
     pub fn with_query_cache(mut self, cache: QueryCache) -> Self {
         self.ctx.cache = Some(cache);
+        self
+    }
+
+    /// Add a read replica. Reads made through `&Db` by the query builder
+    /// (`all`, `first`, `count`, `paginate`, relations, …) are spread across
+    /// replicas round-robin; writes, row locks (`for_update`), transactions
+    /// and raw SQL stay on the primary. A read that fails because a replica
+    /// is unreachable is retried on the primary.
+    ///
+    /// Replicas lag behind the primary: use
+    /// [`Select::on_primary`](crate::Select::on_primary) or
+    /// [`Db::primary`] where a read must see the latest write.
+    pub fn read_replica(mut self, url: impl Into<String>) -> Self {
+        self.replica_urls.push(url.into());
+        self
+    }
+
+    /// Add an existing pool as a read replica (see [`read_replica`](Self::read_replica)).
+    pub fn replica_pool(mut self, pool: PgPool) -> Self {
+        self.ctx.replicas.push(pool);
         self
     }
 
@@ -430,6 +470,15 @@ impl DbBuilder {
     /// Connect to `url` and return the pool.
     pub async fn connect(self, url: &str) -> Result<Db> {
         let pool = self.options.clone().connect(url).await?;
+        self.finish(pool).await
+    }
+
+    /// Connect the configured replica URLs, then build the handle.
+    async fn finish(mut self, pool: PgPool) -> Result<Db> {
+        for url in std::mem::take(&mut self.replica_urls) {
+            let replica = self.options.clone().connect(&url).await?;
+            self.ctx.replicas.push(replica);
+        }
         Ok(self.build(pool))
     }
 
@@ -442,7 +491,8 @@ impl DbBuilder {
     }
 
     /// Wrap an existing sqlx pool, applying this builder's rok-db settings
-    /// (pool options are ignored).
+    /// (pool options and replica URLs are ignored; use
+    /// [`replica_pool`](Self::replica_pool) for replicas).
     pub fn build_with_pool(self, pool: PgPool) -> Db {
         self.build(pool)
     }
@@ -450,13 +500,18 @@ impl DbBuilder {
     /// Connect with fully custom connect options.
     pub async fn connect_with(self, options: PgConnectOptions) -> Result<Db> {
         let pool = self.options.clone().connect_with(options).await?;
-        Ok(self.build(pool))
+        self.finish(pool).await
     }
 
     /// Create the pool without opening any connection until first use.
     pub fn connect_lazy(self, url: &str) -> Result<Db> {
         let pool = self.options.clone().connect_lazy(url)?;
-        Ok(self.build(pool))
+        let mut builder = self;
+        for url in std::mem::take(&mut builder.replica_urls) {
+            let replica = builder.options.clone().connect_lazy(&url)?;
+            builder.ctx.replicas.push(replica);
+        }
+        Ok(builder.build(pool))
     }
 }
 
@@ -540,6 +595,10 @@ impl fmt::Debug for Tx {
 impl<'c> crate::Executor<'c> for &'c Db {
     fn __context(&self) -> Option<Arc<Context>> {
         Some(self.ctx.clone())
+    }
+
+    fn __replica(&self) -> Option<PgPool> {
+        self.ctx.replica()
     }
 }
 
