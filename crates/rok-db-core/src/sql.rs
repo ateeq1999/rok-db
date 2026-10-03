@@ -12,6 +12,8 @@ use crate::{Result, Value};
 pub struct Sql {
     sql: String,
     params: Vec<Value>,
+    /// Render columns as `"table"."column"` (set for queries with joins).
+    pub(crate) qualify: bool,
 }
 
 impl Sql {
@@ -68,6 +70,17 @@ impl Sql {
 
     pub(crate) fn push_ident(&mut self, ident: &str) -> &mut Self {
         push_ident(&mut self.sql, ident);
+        self
+    }
+
+    /// A column, qualified with its table when [`qualify`](Self::qualify)
+    /// is set. Only the table's last segment is used (`app.users` → `users`).
+    pub(crate) fn push_column(&mut self, table: &str, column: &str) -> &mut Self {
+        if self.qualify {
+            push_ident(&mut self.sql, table_alias(table));
+            self.sql.push('.');
+        }
+        push_ident(&mut self.sql, column);
         self
     }
 
@@ -132,6 +145,20 @@ impl fmt::Display for Sql {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.sql)
     }
+}
+
+/// How a table is referred to in qualified column names: its last segment.
+pub(crate) fn table_alias(table: &str) -> &str {
+    table.rsplit('.').next().unwrap_or(table)
+}
+
+/// `"table"."column"`, always qualified.
+pub(crate) fn qualified(table: &str, column: &str) -> String {
+    let mut s = String::new();
+    push_ident(&mut s, table_alias(table));
+    s.push('.');
+    push_ident(&mut s, column);
+    s
 }
 
 /// Quote an identifier, splitting `schema.table` into its parts.

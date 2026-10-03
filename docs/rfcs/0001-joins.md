@@ -1,5 +1,7 @@
 - Feature name: `joins`
 - Start date: 2026-10-03
+- Status: **Accepted** (2026-10-03) — implemented in the first version described under
+  "Decisions" below
 - RFC PR: to be assigned when this RFC's pull request is opened
 - Tracking issue: to be opened on acceptance
 
@@ -154,13 +156,22 @@ building on the relations rok-db already generates.
 Additive. `Select<M>` keeps its meaning through the defaulted parameter. No
 change to SQL generated for existing queries. No MSRV impact.
 
-# Unresolved questions
+# Decisions
 
-1. Should `.all()` on a `has_many` join add `DISTINCT` automatically, or
-   require an explicit `.distinct()`?
-2. How should joined models be returned when users want them, e.g. `Vec<(Post, User)>`?
-   This needs prefixed column aliases, so it could be split into its own RFC.
-3. Naming: `left_join` versus `join_optional`.
+The open questions were resolved by the maintainer:
+
+1. Fetching root models from a join that may multiply rows (`has_many` or ad-hoc
+   joins) de-duplicates automatically with `DISTINCT ON` the root primary key; the
+   requested ordering is preserved. Counts use `COUNT(DISTINCT key)`.
+2. Returning joined models as tuples (`Vec<(Post, User)>`) is left to a follow-up
+   RFC; joins ship for filtering, ordering, grouping and selecting columns.
+3. The optional join is named `left_join`.
+
+Scope of the first implementation: the typed builder (`Joined<M, J>`) with
+`join`/`left_join` from relations or ad-hoc column pairs, `filter`, `order_by`,
+`group_by`, `having`, `limit`, `offset`, `select(..)` across models, and `all`,
+`first`, `one`, `count`, `exists`, `paginate`, `stream`. Not yet: keyset
+pagination, memoization, `UPDATE … FROM` / `DELETE … USING` and self-joins.
 
 # Future possibilities
 

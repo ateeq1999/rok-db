@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Typed joins (RFC 0001, accepted): `Select::join` / `left_join` through
+  `BelongsTo`, `HasMany`, `HasOne` or ad-hoc `Column::on` conditions,
+  returning `Joined<M, J>`, whose `filter`, `order_by`, `group_by`,
+  `having` and `select` accept columns of any joined model (checked at
+  compile time via `InScope`). Joined models' scopes go in the `ON`
+  clause; joins that may multiply rows are de-duplicated with
+  `DISTINCT ON` (counts with `COUNT(DISTINCT …)`), preserving ordering and
+  supporting `paginate`.
+
 - Composite primary keys: several `#[rok(primary_key)]` fields,
   `Model::PRIMARY_KEYS`, `Model::key_values`, `Model::key_filter` and the
   `IntoKey` trait (`find`/`find_or_fail`/`find_many` take a value or a
@@ -135,12 +144,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `#[rok_db::test]` macro builds with syn 3.
 - `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
   awaited, not when the future is created, so scopes such as
   `with_tenant` apply to futures created outside them.
 
 ### Changed
 
+- `Column`'s predicate methods require `M: Model` (columns now carry their
+  table, so joined queries can qualify them); JSON, array and search
+  helpers always render table-qualified column names.
 - `find`, `find_or_fail` and `find_many` take `impl IntoKey` (any
   `Into<Value>` still works).
 - `Order` can target expressions; keyset pagination rejects expression

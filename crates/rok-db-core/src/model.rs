@@ -735,7 +735,7 @@ pub(crate) fn tenant_override<M: Model>(column: &str) -> Option<Value> {
 
 pub(crate) fn push_columns<M: Model>(sql: &mut Sql) {
     sql.push_list(M::COLUMNS, ", ", |sql, c| {
-        sql.push_ident(c);
+        sql.push_column(M::TABLE, c);
     });
 }
 

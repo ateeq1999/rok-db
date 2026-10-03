@@ -31,10 +31,25 @@ impl<M> Column<M> {
     pub const fn name(&self) -> &'static str {
         self.name
     }
+}
+
+impl<M: Model> Column<M> {
+    /// The column as a SQL value expression.
+    pub(crate) fn term(self) -> Term {
+        Term::Column {
+            table: M::TABLE,
+            name: self.name,
+        }
+    }
+
+    /// `"table"."column"`, for raw SQL fragments.
+    fn qualified(self) -> String {
+        crate::sql::qualified(M::TABLE, self.name)
+    }
 
     fn cmp(self, op: &'static str, value: impl Into<Value>) -> Expr<M> {
         Expr::new(Cond::Cmp {
-            term: Term::Column(self.name),
+            term: self.term(),
             op,
             value: value.into(),
         })
@@ -103,6 +118,7 @@ impl<M> Column<M> {
     /// `column IN (…)`. An empty list matches nothing.
     pub fn is_in<V: Into<Value>>(self, values: impl IntoIterator<Item = V>) -> Expr<M> {
         Expr::new(Cond::In {
+            table: M::TABLE,
             column: self.name,
             values: values.into_iter().map(Into::into).collect(),
             negated: false,
@@ -112,6 +128,7 @@ impl<M> Column<M> {
     /// `column NOT IN (…)`. An empty list matches everything.
     pub fn not_in<V: Into<Value>>(self, values: impl IntoIterator<Item = V>) -> Expr<M> {
         Expr::new(Cond::In {
+            table: M::TABLE,
             column: self.name,
             values: values.into_iter().map(Into::into).collect(),
             negated: true,
@@ -129,6 +146,7 @@ impl<M> Column<M> {
     pub fn in_subquery<N: Model>(self, subquery: Projected<N>) -> Expr<M> {
         Expr::new(Cond::Sub {
             kind: SubKind::In {
+                table: M::TABLE,
                 column: self.name,
                 negated: false,
             },
@@ -141,6 +159,7 @@ impl<M> Column<M> {
     pub fn not_in_subquery<N: Model>(self, subquery: Projected<N>) -> Expr<M> {
         Expr::new(Cond::Sub {
             kind: SubKind::In {
+                table: M::TABLE,
                 column: self.name,
                 negated: true,
             },
@@ -169,6 +188,7 @@ impl<M> Column<M> {
     /// `column BETWEEN low AND high`
     pub fn between(self, low: impl Into<Value>, high: impl Into<Value>) -> Expr<M> {
         Expr::new(Cond::Between {
+            table: M::TABLE,
             column: self.name,
             low: low.into(),
             high: high.into(),
@@ -178,6 +198,7 @@ impl<M> Column<M> {
     /// `column IS NULL`
     pub fn is_null(self) -> Expr<M> {
         Expr::new(Cond::Null {
+            table: M::TABLE,
             column: self.name,
             negated: false,
         })
@@ -186,6 +207,7 @@ impl<M> Column<M> {
     /// `column IS NOT NULL`
     pub fn is_not_null(self) -> Expr<M> {
         Expr::new(Cond::Null {
+            table: M::TABLE,
             column: self.name,
             negated: true,
         })
@@ -201,7 +223,7 @@ impl<M> Column<M> {
         Vec<T>: Into<Value>,
     {
         let values: Vec<T> = values.into_iter().collect();
-        Expr::raw(format!("{} = ANY(?)", quoted(self.name)), [values.into()])
+        Expr::raw(format!("{} = ANY(?)", self.qualified()), [values.into()])
     }
 
     /// Array column contains every element of `values` (`column @> $1`).
@@ -216,7 +238,7 @@ impl<M> Column<M> {
 
     /// Array column contains `value` (`$1 = ANY(column)`).
     pub fn array_has(self, value: impl Into<Value>) -> Expr<M> {
-        Expr::raw(format!("? = ANY({})", quoted(self.name)), [value.into()])
+        Expr::raw(format!("? = ANY({})", self.qualified()), [value.into()])
     }
 
     // ----- PostgreSQL: JSONB -------------------------------------------------
@@ -248,7 +270,7 @@ impl<M> Column<M> {
     /// The text value at `key` of a JSON/JSONB column (`column ->> $1`), to
     /// filter, select or order by: `User::PREFS.json_text("theme").eq("dark")`.
     pub fn json_text(self, key: &str) -> Projection<M> {
-        Projection::raw(format!("{} ->> ?", quoted(self.name)), [key])
+        Projection::raw(format!("{} ->> ?", self.qualified()), [key])
     }
 
     /// The text value at a nested path (`column #>> $1`):
@@ -258,7 +280,7 @@ impl<M> Column<M> {
         path: impl IntoIterator<Item = K>,
     ) -> Projection<M> {
         let path: Vec<String> = path.into_iter().map(Into::into).collect();
-        Projection::raw(format!("{} #>> ?", quoted(self.name)), [path])
+        Projection::raw(format!("{} #>> ?", self.qualified()), [path])
     }
 
     // ----- PostgreSQL: full-text search ----------------------------------------
@@ -274,7 +296,7 @@ impl<M> Column<M> {
         Expr::raw(
             format!(
                 "to_tsvector({}) @@ websearch_to_tsquery(?)",
-                quoted(self.name)
+                self.qualified()
             ),
             [query],
         )
@@ -286,7 +308,7 @@ impl<M> Column<M> {
         Expr::raw(
             format!(
                 "to_tsvector(?::regconfig, {}) @@ websearch_to_tsquery(?::regconfig, ?)",
-                quoted(self.name)
+                self.qualified()
             ),
             [config, config, query],
         )
@@ -295,7 +317,7 @@ impl<M> Column<M> {
     /// Match a `tsvector` column: `column @@ websearch_to_tsquery($1)`.
     pub fn ts_matches(self, query: &str) -> Expr<M> {
         Expr::raw(
-            format!("{} @@ websearch_to_tsquery(?)", quoted(self.name)),
+            format!("{} @@ websearch_to_tsquery(?)", self.qualified()),
             [query],
         )
     }
@@ -306,7 +328,7 @@ impl<M> Column<M> {
         Projection::raw(
             format!(
                 "ts_rank(to_tsvector({}), websearch_to_tsquery(?))",
-                quoted(self.name)
+                self.qualified()
             ),
             [query],
         )
@@ -314,45 +336,45 @@ impl<M> Column<M> {
 
     /// `COUNT(column)` — number of non-`NULL` values.
     pub fn count(self) -> Projection<M> {
-        Projection::func("COUNT", Some(self.name), false)
+        Projection::func("COUNT", Some((M::TABLE, self.name)), false)
     }
 
     /// `COUNT(DISTINCT column)`
     pub fn count_distinct(self) -> Projection<M> {
-        Projection::func("COUNT", Some(self.name), true)
+        Projection::func("COUNT", Some((M::TABLE, self.name)), true)
     }
 
     /// `SUM(column)`. PostgreSQL returns `BIGINT` for `SMALLINT`/`INTEGER`
     /// columns and `NUMERIC` for `BIGINT` columns; use
     /// [`Projection::cast`] to pick the Rust type you decode into.
     pub fn sum(self) -> Projection<M> {
-        Projection::func("SUM", Some(self.name), false)
+        Projection::func("SUM", Some((M::TABLE, self.name)), false)
     }
 
     /// `AVG(column)`, returned as `NUMERIC` for integer columns; see
     /// [`Projection::cast`].
     pub fn avg(self) -> Projection<M> {
-        Projection::func("AVG", Some(self.name), false)
+        Projection::func("AVG", Some((M::TABLE, self.name)), false)
     }
 
     /// `MIN(column)`
     pub fn min(self) -> Projection<M> {
-        Projection::func("MIN", Some(self.name), false)
+        Projection::func("MIN", Some((M::TABLE, self.name)), false)
     }
 
     /// `MAX(column)`
     pub fn max(self) -> Projection<M> {
-        Projection::func("MAX", Some(self.name), false)
+        Projection::func("MAX", Some((M::TABLE, self.name)), false)
     }
 
     /// Ascending ordering on this column.
     pub fn asc(self) -> Order<M> {
-        Order::new(self.name, Direction::Asc)
+        Order::new(M::TABLE, self.name, Direction::Asc)
     }
 
     /// Descending ordering on this column.
     pub fn desc(self) -> Order<M> {
-        Order::new(self.name, Direction::Desc)
+        Order::new(M::TABLE, self.name, Direction::Desc)
     }
 }
 
@@ -374,12 +396,6 @@ impl<M> fmt::Display for Column<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name)
     }
-}
-
-fn quoted(ident: &str) -> String {
-    let mut s = String::new();
-    crate::sql::push_ident(&mut s, ident);
-    s
 }
 
 fn escape_like(text: &str) -> String {
@@ -485,6 +501,14 @@ impl<M> Expr<M> {
     }
 }
 
+impl<M> Expr<M> {
+    /// Re-tag a condition for another model (used by joins, whose
+    /// conditions are already table-qualified).
+    pub(crate) fn retag<N>(self) -> Expr<N> {
+        Expr::new(self.cond)
+    }
+}
+
 impl<M> Not for Expr<M> {
     type Output = Expr<M>;
 
@@ -508,10 +532,13 @@ impl<M> fmt::Debug for Expr<M> {
 /// Something that renders to a SQL value expression.
 #[derive(Debug, Clone)]
 pub(crate) enum Term {
-    Column(&'static str),
+    Column {
+        table: &'static str,
+        name: &'static str,
+    },
     Func {
         func: &'static str,
-        arg: Option<&'static str>,
+        arg: Option<(&'static str, &'static str)>,
         distinct: bool,
     },
     Cast(Box<Term>, &'static str),
@@ -521,8 +548,8 @@ pub(crate) enum Term {
 impl Term {
     pub(crate) fn write(&self, sql: &mut Sql) {
         match self {
-            Term::Column(name) => {
-                sql.push_ident(name);
+            Term::Column { table, name } => {
+                sql.push_column(table, name);
             }
             Term::Func {
                 func,
@@ -534,7 +561,7 @@ impl Term {
                     sql.push("DISTINCT ");
                 }
                 match arg {
-                    Some(arg) => sql.push_ident(arg),
+                    Some((table, column)) => sql.push_column(table, column),
                     None => sql.push("*"),
                 };
                 sql.push(")");
@@ -572,8 +599,14 @@ impl fmt::Debug for Render {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SubKind {
-    In { column: &'static str, negated: bool },
-    Exists { negated: bool },
+    In {
+        table: &'static str,
+        column: &'static str,
+        negated: bool,
+    },
+    Exists {
+        negated: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -593,16 +626,19 @@ pub(crate) enum Cond {
         value: Value,
     },
     In {
+        table: &'static str,
         column: &'static str,
         values: Vec<Value>,
         negated: bool,
     },
     Between {
+        table: &'static str,
         column: &'static str,
         low: Value,
         high: Value,
     },
     Null {
+        table: &'static str,
         column: &'static str,
         negated: bool,
     },
@@ -620,9 +656,16 @@ impl Cond {
         match self {
             Cond::Sub { kind, render } => {
                 match kind {
-                    SubKind::In { column, negated } => {
-                        sql.push_ident(column)
-                            .push(if *negated { " NOT IN (" } else { " IN (" });
+                    SubKind::In {
+                        table,
+                        column,
+                        negated,
+                    } => {
+                        sql.push_column(table, column).push(if *negated {
+                            " NOT IN ("
+                        } else {
+                            " IN ("
+                        });
                     }
                     SubKind::Exists { negated } => {
                         sql.push(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
@@ -632,9 +675,9 @@ impl Cond {
                 sql.push(")");
             }
             Cond::Columns { left, op, right } => {
-                sql.push_ident(left.0).push(".").push_ident(left.1);
+                sql.push(&crate::sql::qualified(left.0, left.1));
                 sql.push(" ").push(op).push(" ");
-                sql.push_ident(right.0).push(".").push_ident(right.1);
+                sql.push(&crate::sql::qualified(right.0, right.1));
             }
             Cond::Cmp { term, op, value } => {
                 term.write(sql);
@@ -642,6 +685,7 @@ impl Cond {
                 sql.bind(value.clone());
             }
             Cond::In {
+                table,
                 column,
                 values,
                 negated,
@@ -650,20 +694,32 @@ impl Cond {
                     sql.push(if *negated { "TRUE" } else { "FALSE" });
                     return;
                 }
-                sql.push_ident(column)
+                sql.push_column(table, column)
                     .push(if *negated { " NOT IN (" } else { " IN (" });
                 sql.push_list(values, ", ", |sql, v| {
                     sql.bind(v.clone());
                 });
                 sql.push(")");
             }
-            Cond::Between { column, low, high } => {
-                sql.push_ident(column).push(" BETWEEN ");
+            Cond::Between {
+                table,
+                column,
+                low,
+                high,
+            } => {
+                sql.push_column(table, column).push(" BETWEEN ");
                 sql.bind(low.clone()).push(" AND ").bind(high.clone());
             }
-            Cond::Null { column, negated } => {
-                sql.push_ident(column)
-                    .push(if *negated { " IS NOT NULL" } else { " IS NULL" });
+            Cond::Null {
+                table,
+                column,
+                negated,
+            } => {
+                sql.push_column(table, column).push(if *negated {
+                    " IS NOT NULL"
+                } else {
+                    " IS NULL"
+                });
             }
             Cond::Raw { sql: raw, params } => {
                 sql.push("(").push_raw(raw, params).push(")");
@@ -723,12 +779,20 @@ impl<M> Projection<M> {
         }
     }
 
-    fn func(func: &'static str, arg: Option<&'static str>, distinct: bool) -> Self {
+    fn func(func: &'static str, arg: Option<(&'static str, &'static str)>, distinct: bool) -> Self {
         Self::new(Term::Func {
             func,
             arg,
             distinct,
         })
+    }
+
+    pub(crate) fn retag<N>(self) -> Projection<N> {
+        Projection {
+            term: self.term,
+            alias: self.alias,
+            _model: PhantomData,
+        }
     }
 
     /// `COUNT(*)`
@@ -820,9 +884,9 @@ impl<M> Projection<M> {
     }
 }
 
-impl<M> From<Column<M>> for Projection<M> {
+impl<M: Model> From<Column<M>> for Projection<M> {
     fn from(column: Column<M>) -> Self {
-        Self::new(Term::Column(column.name()))
+        Self::new(column.term())
     }
 }
 
@@ -851,7 +915,7 @@ pub trait IntoProjections<M> {
     fn into_projections(self) -> Vec<Projection<M>>;
 }
 
-impl<M> IntoProjections<M> for Column<M> {
+impl<M: Model> IntoProjections<M> for Column<M> {
     fn into_projections(self) -> Vec<Projection<M>> {
         vec![self.into()]
     }
@@ -922,13 +986,22 @@ pub struct Order<M> {
 /// What an `ORDER BY` term sorts by.
 #[derive(Debug, Clone)]
 pub(crate) enum OrderTarget {
-    Column(&'static str),
+    Column {
+        table: &'static str,
+        name: &'static str,
+    },
     Term(Term),
 }
 
 impl<M> Order<M> {
-    pub(crate) fn new(column: &'static str, direction: Direction) -> Self {
-        Self::with_target(OrderTarget::Column(column), direction)
+    pub(crate) fn new(table: &'static str, column: &'static str, direction: Direction) -> Self {
+        Self::with_target(
+            OrderTarget::Column {
+                table,
+                name: column,
+            },
+            direction,
+        )
     }
 
     fn with_target(target: OrderTarget, direction: Direction) -> Self {
@@ -943,8 +1016,17 @@ impl<M> Order<M> {
     /// The column, if this orders by a plain column.
     pub(crate) fn column(&self) -> Option<&'static str> {
         match self.target {
-            OrderTarget::Column(c) => Some(c),
+            OrderTarget::Column { name, .. } => Some(name),
             OrderTarget::Term(_) => None,
+        }
+    }
+
+    pub(crate) fn retag<N>(self) -> Order<N> {
+        Order {
+            target: self.target,
+            direction: self.direction,
+            nulls: self.nulls,
+            _model: PhantomData,
         }
     }
 
@@ -964,8 +1046,12 @@ impl<M> Order<M> {
     /// expression (used when the expression was selected under that alias).
     pub(crate) fn write_key(&self, sql: &mut Sql, prefix: &str, alias: Option<&str>) {
         match (&self.target, alias) {
-            (OrderTarget::Column(c), _) => {
-                sql.push(prefix).push_ident(c);
+            (OrderTarget::Column { table, name }, _) => {
+                if prefix.is_empty() {
+                    sql.push_column(table, name);
+                } else {
+                    sql.push(prefix).push_ident(name);
+                }
             }
             (OrderTarget::Term(_), Some(alias)) => {
                 sql.push(prefix).push_ident(alias);
@@ -1011,7 +1097,7 @@ impl<M> fmt::Debug for Order<M> {
     }
 }
 
-impl<M> From<Column<M>> for Order<M> {
+impl<M: Model> From<Column<M>> for Order<M> {
     fn from(column: Column<M>) -> Self {
         column.asc()
     }
@@ -1024,6 +1110,24 @@ mod tests {
     struct T;
     const A: Column<T> = Column::new("a");
     const B: Column<T> = Column::new("b");
+
+    impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for T {
+        fn from_row(_: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+            Ok(T)
+        }
+    }
+    impl crate::Hooks for T {}
+    impl Model for T {
+        const TABLE: &'static str = "t";
+        const PRIMARY_KEY: &'static str = "a";
+        const COLUMNS: &'static [&'static str] = &["a", "b"];
+        fn primary_key(&self) -> Value {
+            Value::I32(None)
+        }
+        fn values(&self) -> Vec<(&'static str, Value)> {
+            Vec::new()
+        }
+    }
 
     fn render(e: Expr<T>) -> String {
         let mut sql = Sql::new();
@@ -1053,6 +1157,21 @@ mod tests {
         assert_eq!(
             render(B.count_distinct().eq(1)),
             r#"COUNT(DISTINCT "b") = $1"#
+        );
+    }
+
+    #[test]
+    fn qualifies_columns_on_request() {
+        let mut sql = Sql::new();
+        sql.qualify = true;
+        A.eq(1)
+            .and(B.is_null())
+            .and(A.is_in([2]))
+            .cond
+            .write(&mut sql);
+        assert_eq!(
+            sql.as_str(),
+            r#"("t"."a" = $1 AND "t"."b" IS NULL AND "t"."a" IN ($2))"#
         );
     }
 
