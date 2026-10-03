@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Composite primary keys: several `#[rok(primary_key)]` fields,
+  `Model::PRIMARY_KEYS`, `Model::key_values`, `Model::key_filter` and the
+  `IntoKey` trait (`find`/`find_or_fail`/`find_many` take a value or a
+  tuple). Record operations, upserts, optimistic locking, keyset
+  tiebreakers, change feeds and audit history use the whole key; relation
+  loaders report an error for composite parent keys.
+
 - Shared cache invalidation: `DbBuilder::shared_cache_invalidation`
   broadcasts query-cache invalidations between processes over
   `LISTEN`/`NOTIFY` (clearing the local cache after reconnects).
@@ -134,6 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `find`, `find_or_fail` and `find_many` take `impl IntoKey` (any
+  `Into<Value>` still works).
 - `Order` can target expressions; keyset pagination rejects expression
   orders with `Error::InvalidQuery`.
 - `Executor` is now a rok-db trait (implemented for `&Db`, `&mut Tx`,

@@ -37,6 +37,8 @@ use syn::{Data, DeriveInput, Fields, Ident, LitStr, Path, parse_macro_input, spa
 /// # Field attributes
 ///
 /// - `#[rok(primary_key)]` — the primary key. Defaults to the field named `id`.
+///   Mark several fields for a composite key (in field order); look records
+///   up with a tuple: `Membership::find(&db, (org_id, user_id))`.
 /// - `#[rok(generated)]` — filled in by the database (serial ids, defaults,
 ///   triggers): read, but never written by `insert`/`save`.
 /// - `#[rok(column = "name")]` — column name, if it differs from the field.
@@ -241,22 +243,17 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let fields = parse_fields(&input, "Model")?;
 
     let columns: Vec<&Field> = fields.iter().filter(|f| !f.skip).collect();
-    let mut pks = columns.iter().filter(|f| f.primary_key);
-    let pk = match (pks.next(), pks.next()) {
-        (Some(pk), None) => *pk,
-        (Some(_), Some(second)) => {
-            return Err(syn::Error::new(
-                second.ident.span(),
-                "only one field can be `#[rok(primary_key)]` (composite keys are not supported)",
-            ));
-        }
-        (None, _) => *columns.iter().find(|f| f.ident == "id").ok_or_else(|| {
+    let mut pks: Vec<&Field> = columns.iter().filter(|f| f.primary_key).copied().collect();
+    if pks.is_empty() {
+        pks.push(*columns.iter().find(|f| f.ident == "id").ok_or_else(|| {
             syn::Error::new(
                 name.span(),
-                "no primary key: add a field named `id` or mark one with `#[rok(primary_key)]`",
+                "no primary key: add a field named `id` or mark one or more fields with `#[rok(primary_key)]`",
             )
-        })?,
-    };
+        })?);
+    }
+    let pk = pks[0];
+    let pk_columns = pks.iter().map(|f| &f.column);
 
     let find_ts = |flag: fn(&Field) -> bool,
                    default: &str,
@@ -447,6 +444,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         impl #krate::Model for #name {
             const TABLE: &'static str = #table;
             const PRIMARY_KEY: &'static str = #pk_column;
+            const PRIMARY_KEYS: &'static [&'static str] = &[#(#pk_columns),*];
             const COLUMNS: &'static [&'static str] = &[#(#column_names),*];
             const GENERATED: &'static [&'static str] = &[#(#generated),*];
             const CREATED_AT_COLUMN: ::core::option::Option<&'static str> = #created_at;

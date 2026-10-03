@@ -6,6 +6,7 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 
 use crate::exec;
+use crate::key::{IntoKey, key_expr, key_string};
 use crate::query::{Conflict, ConflictAction, ConflictTarget, Insert, InsertMany, Select, Update};
 use crate::sql::Sql;
 use crate::validate::ValidationErrors;
@@ -85,8 +86,10 @@ pub trait Model:
 {
     /// Table name, optionally schema-qualified (`"auth.users"`).
     const TABLE: &'static str;
-    /// Primary key column.
+    /// Primary key column (the first one, for composite keys).
     const PRIMARY_KEY: &'static str;
+    /// Every primary key column, in order (more than one for composite keys).
+    const PRIMARY_KEYS: &'static [&'static str] = &[Self::PRIMARY_KEY];
     /// Every column read from and written to the database, in field order.
     const COLUMNS: &'static [&'static str];
     /// Columns filled in by the database (serial ids, defaults, triggers).
@@ -105,8 +108,22 @@ pub trait Model:
     /// `delete` fail with [`Error::Conflict`] if it changed since loading.
     const VERSION_COLUMN: Option<&'static str> = None;
 
-    /// The value of this record's primary key.
+    /// The value of this record's primary key (its first column, for
+    /// composite keys; see [`key_values`](Model::key_values)).
     fn primary_key(&self) -> Value;
+
+    /// The values of every primary key column, in order.
+    fn key_values(&self) -> Vec<Value> {
+        Self::PRIMARY_KEYS
+            .iter()
+            .map(|c| self.value_of(c).unwrap_or(Value::I64(None)))
+            .collect()
+    }
+
+    /// A condition matching this record by its (possibly composite) key.
+    fn key_filter(&self) -> Expr<Self> {
+        crate::key::key_expr::<Self>(self.key_values()).unwrap_or_else(|_| Expr::none())
+    }
 
     /// Every column with its current value, in [`COLUMNS`](Model::COLUMNS) order.
     fn values(&self) -> Vec<(&'static str, Value)>;
@@ -184,28 +201,28 @@ pub trait Model:
     /// Fetch a record by primary key, or `None`.
     fn find<'e, E>(
         executor: E,
-        id: impl Into<Value>,
+        id: impl IntoKey,
     ) -> impl Future<Output = Result<Option<Self>>> + Send
     where
         E: Executor<'e>,
     {
-        let select = Self::filter(Self::primary_key_column().eq(id));
-        async move { select.first(executor).await }
+        let select = key_expr::<Self>(id.into_key()).map(Self::filter);
+        async move { select?.first(executor).await }
     }
 
     /// Fetch a record by primary key, failing with [`Error::NotFound`].
     fn find_or_fail<'e, E>(
         executor: E,
-        id: impl Into<Value>,
+        id: impl IntoKey,
     ) -> impl Future<Output = Result<Self>> + Send
     where
         E: Executor<'e>,
     {
-        let id = id.into();
-        let key = id.to_string();
-        let select = Self::filter(Self::primary_key_column().eq(id));
+        let values = id.into_key();
+        let key = key_string(&values);
+        let select = key_expr::<Self>(values).map(Self::filter);
         async move {
-            select
+            select?
                 .first(executor)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(Some(key)))
@@ -213,16 +230,26 @@ pub trait Model:
     }
 
     /// Fetch every record whose primary key is in `ids`.
-    fn find_many<'e, E, V>(
+    fn find_many<'e, E, K>(
         executor: E,
-        ids: impl IntoIterator<Item = V>,
+        ids: impl IntoIterator<Item = K>,
     ) -> impl Future<Output = Result<Vec<Self>>> + Send
     where
         E: Executor<'e>,
-        V: Into<Value>,
+        K: IntoKey,
     {
-        let select = Self::filter(Self::primary_key_column().is_in(ids));
-        async move { select.all(executor).await }
+        let keys: Vec<Vec<Value>> = ids.into_iter().map(IntoKey::into_key).collect();
+        let select = if Self::PRIMARY_KEYS.len() == 1 {
+            Ok(Self::filter(
+                Self::primary_key_column().is_in(keys.into_iter().flatten()),
+            ))
+        } else {
+            keys.into_iter()
+                .map(key_expr::<Self>)
+                .collect::<Result<Vec<_>>>()
+                .map(|exprs| Self::filter(Expr::any_of(exprs)))
+        };
+        async move { select?.all(executor).await }
     }
 
     /// Fetch every record in the table.
@@ -247,11 +274,8 @@ pub trait Model:
         E: Executor<'e>,
     {
         // Reloading a soft-deleted record still works.
-        let key = self.primary_key();
-        let missing = key.to_string();
-        let select = Self::filter(Self::primary_key_column().eq(key))
-            .with_trashed()
-            .unscoped();
+        let missing = key_string(&self.key_values());
+        let select = Self::filter(self.key_filter()).with_trashed().unscoped();
         async move {
             select
                 .first(executor)
@@ -368,7 +392,7 @@ pub trait Model:
         E: Executor<'e>,
     {
         let conflict = Conflict {
-            target: ConflictTarget::Columns(vec![Self::PRIMARY_KEY]),
+            target: ConflictTarget::Columns(Self::PRIMARY_KEYS.to_vec()),
             action: ConflictAction::UpdateAll,
         };
         async move {
@@ -448,10 +472,9 @@ pub trait Model:
             .validate()
             .map_err(Error::Validation)
             .and_then(|()| self.before_save());
-        let pk = self.primary_key();
-        let key = pk.to_string();
+        let key = key_string(&self.key_values());
         let managed = |c: &str| {
-            c == Self::PRIMARY_KEY
+            Self::PRIMARY_KEYS.contains(&c)
                 || is_timestamp::<Self>(c)
                 || Self::VERSION_COLUMN == Some(c)
                 || Self::TENANT_COLUMN == Some(c)
@@ -463,7 +486,7 @@ pub trait Model:
         let mut update = Self::update_all()
             .with_trashed()
             .unscoped()
-            .filter(Self::primary_key_column().eq(pk.clone()));
+            .filter(self.key_filter());
         let version = Self::VERSION_COLUMN.and_then(|c| self.value_of(c).map(|v| (c, v)));
         if let Some((column, current)) = version.clone() {
             update = update.filter(Column::new(column).eq(current));
@@ -485,10 +508,8 @@ pub trait Model:
             } else if version.is_some() {
                 let mut sql = Sql::new();
                 update.write_into(&mut sql);
-                let exists = Self::filter(Self::primary_key_column().eq(pk.clone()))
-                    .with_trashed()
-                    .unscoped();
-                checked_write::<Self, _>(executor, sql, pk, exists).await?
+                let exists = Self::filter(self.key_filter()).with_trashed().unscoped();
+                checked_write::<Self, _>(executor, sql, key, exists).await?
             } else {
                 update
                     .returning_one(executor)
@@ -532,11 +553,10 @@ pub trait Model:
         E: Executor<'e>,
     {
         let pre = self.before_delete();
-        let pk = self.primary_key();
-        let key = pk.to_string();
+        let key = key_string(&self.key_values());
         let soft = Self::DELETED_AT_COLUMN.filter(|_| !force);
         let version = Self::VERSION_COLUMN.and_then(|c| self.value_of(c).map(|v| (c, v)));
-        let mut select = Self::filter(Self::primary_key_column().eq(pk.clone())).unscoped();
+        let mut select = Self::filter(self.key_filter()).unscoped();
         if force {
             select = select.with_trashed();
         }
@@ -564,7 +584,7 @@ pub trait Model:
                 }
             }
             if version.is_some() {
-                checked_write::<Self, _>(executor, sql, pk, exists).await?;
+                checked_write::<Self, _>(executor, sql, key, exists).await?;
             } else if exec::execute(executor, &sql, &[Self::TABLE]).await? == 0 {
                 return Err(Error::not_found::<Self>(Some(key)));
             }
@@ -578,10 +598,9 @@ pub trait Model:
     where
         E: Executor<'e>,
     {
-        let pk = self.primary_key();
-        let key = pk.to_string();
+        let key = key_string(&self.key_values());
         let update = Self::DELETED_AT_COLUMN.map(|deleted_at| {
-            Self::filter(Self::primary_key_column().eq(pk))
+            Self::filter(self.key_filter())
                 .only_trashed()
                 .unscoped()
                 .update()
@@ -616,10 +635,9 @@ pub trait Model:
 async fn checked_write<'e, M: Model, E: Executor<'e>>(
     executor: E,
     write: Sql,
-    pk: Value,
+    key: String,
     exists: Select<M>,
 ) -> Result<M> {
-    let key = pk.to_string();
     let mut sql = Sql::new();
     sql.push(r#"WITH "__rok_w" AS ("#);
     sql.append(write);
@@ -669,7 +687,8 @@ pub(crate) fn insert_sql<M: Model>(
     include_pk: bool,
     conflict: Option<&Conflict>,
 ) -> Result<Sql> {
-    let include = |c: &str| !M::GENERATED.contains(&c) || (include_pk && c == M::PRIMARY_KEY);
+    let include =
+        |c: &str| !M::GENERATED.contains(&c) || (include_pk && M::PRIMARY_KEYS.contains(&c));
     let columns: Vec<&'static str> = M::COLUMNS.iter().copied().filter(|c| include(c)).collect();
 
     let mut sql = Sql::new();
@@ -728,7 +747,7 @@ pub(crate) fn push_returning<M: Model>(sql: &mut Sql) {
 #[doc(hidden)]
 pub fn __insert_sql<M: Model>(records: &[M], upsert: bool) -> Sql {
     let conflict = upsert.then(|| Conflict {
-        target: ConflictTarget::Columns(vec![M::PRIMARY_KEY]),
+        target: ConflictTarget::Columns(M::PRIMARY_KEYS.to_vec()),
         action: ConflictAction::UpdateAll,
     });
     insert_sql(records, upsert, conflict.as_ref()).expect("valid insert")

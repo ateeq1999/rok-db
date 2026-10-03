@@ -160,6 +160,25 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in in_subquery not_in_subquery eq_outer between is_null is_not_null asc desc`.
 Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, `Expr::exists(..)`, `Expr::not_exists(..)`, or `Expr::raw("lower(email) = ?", [v])`.
 
+### Composite primary keys
+
+```rust
+#[derive(Model)]
+struct Membership {
+    #[rok(primary_key)] org_id: i64,
+    #[rok(primary_key)] user_id: i64,
+    role: String,
+}
+
+Membership::find(&db, (org_id, user_id)).await?;            // tuple in key-field order
+Membership::find_many(&db, [(1, 2), (1, 3)]).await?;
+membership.save(&db).await?;                                // WHERE org_id = $ AND user_id = $
+```
+
+Everything that identifies a row — `save`, `delete`, `reload`, `upsert`, optimistic locking, keyset
+pagination tiebreakers, change feeds and the audit log — uses the whole key. Relations still need a
+single-column key on the parent side.
+
 ### Relations
 
 ```rust

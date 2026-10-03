@@ -104,6 +104,8 @@
 //! - **Multi-instance caching**: [`DbBuilder::shared_cache_invalidation`].
 //! - **Multi-tenancy**: `#[rok(tenant)]` and [`tenant::with_tenant`].
 //! - **Audit log** (feature `json`): the [`audit`] module.
+//! - **Composite primary keys**: several `#[rok(primary_key)]` fields;
+//!   look records up with tuples ([`IntoKey`]).
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`

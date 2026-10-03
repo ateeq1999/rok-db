@@ -571,8 +571,10 @@ impl<M: Model> Select<M> {
             .iter()
             .filter_map(|o| o.column().map(|c| (c, o.direction)))
             .collect();
-        if !order.iter().any(|(c, _)| *c == M::PRIMARY_KEY) {
-            order.push((M::PRIMARY_KEY, Direction::Asc));
+        for key in M::PRIMARY_KEYS {
+            if !order.iter().any(|(c, _)| c == key) {
+                order.push((key, Direction::Asc));
+            }
         }
         order
     }
@@ -1161,7 +1163,7 @@ impl Conflict {
                 .copied()
                 .filter(|c| {
                     !target_columns.contains(c)
-                        && *c != M::PRIMARY_KEY
+                        && !M::PRIMARY_KEYS.contains(c)
                         && M::CREATED_AT_COLUMN != Some(*c)
                 })
                 .collect(),
