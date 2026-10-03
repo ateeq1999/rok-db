@@ -431,6 +431,28 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     });
 
     let from_row_impl = from_row.then(|| from_row_tokens(name, &fields, &krate));
+    let from_row_at_fn = from_row.then(|| {
+        let mut index = 0usize;
+        let inits = fields.iter().map(|f| {
+            let ident = &f.ident;
+            if f.skip {
+                quote!(#ident: ::core::default::Default::default())
+            } else {
+                let i = index;
+                index += 1;
+                quote!(#ident: #krate::__private::Row::try_get(row, offset + #i)?)
+            }
+        });
+        let inits: Vec<_> = inits.collect();
+        quote! {
+            fn from_row_at(
+                row: &#krate::__private::PgRow,
+                offset: usize,
+            ) -> ::core::result::Result<Self, #krate::__private::SqlxError> {
+                ::core::result::Result::Ok(Self { #(#inits,)* })
+            }
+        }
+    });
 
     Ok(quote! {
         #from_row_impl
@@ -463,6 +485,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 
             #validate_fn
             #default_scope_fn
+            #from_row_at_fn
 
             fn value_of(&self, column: &str) -> ::core::option::Option<#krate::Value> {
                 match column {

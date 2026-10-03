@@ -195,5 +195,24 @@ pub mod prelude {
 ///
 /// let _ = Post::query().join(Post::USER).filter(User::NAME.eq("x"));
 /// ```
+///
+/// Only joined models can be fetched as tuples:
+///
+/// ```compile_fail
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+/// #[derive(Model)] struct Tag { id: i64, label: String }
+///
+/// let _ = Post::query().join(Post::USER).with_sql::<Tag, _>();
+/// ```
+///
+/// ```
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+///
+/// let _ = Post::query().join(Post::USER).with_sql::<(User, Option<User>), _>();
+/// ```
 #[doc(hidden)]
 pub mod __compile_checks {}

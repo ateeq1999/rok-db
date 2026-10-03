@@ -394,7 +394,7 @@ impl<M: Model> Select<M> {
     }
 
     /// Everything after the select list.
-    fn write_tail(&self, sql: &mut Sql) {
+    pub(crate) fn write_tail(&self, sql: &mut Sql) {
         self.write_from_where(sql);
         if !self.group_by.is_empty() {
             sql.push(" GROUP BY ")
@@ -789,7 +789,9 @@ impl<M: Model> Select<M> {
     /// doesn't grow with the page number and rows aren't skipped or repeated
     /// when data changes between requests.
     ///
-    /// Ordering columns must be `NOT NULL`. Pass `None` for the first page,
+    /// Sort keys (columns or expressions) must be `NOT NULL`; expression
+    /// orders and joined queries paginate over a wrapped subquery. Pass
+    /// `None` for the first page,
     /// then `page.next` for the following ones:
     ///
     /// ```ignore

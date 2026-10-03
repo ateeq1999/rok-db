@@ -36,12 +36,17 @@
 //! need one in a joined `select`: write `Projection::<Post>::count_all()`
 //! or a column aggregate such as `Post::ID.count()`.
 //!
+//! Through joins you can also `cursor_paginate`, `memoize` (invalidated by
+//! writes to any joined table), bulk `update` / `delete` / `restore`, and
+//! fetch whole models as tuples with [`Joined::all_with`].
+//!
 //! Not supported: self-joins (the same table twice).
 
 use std::fmt;
 use std::marker::PhantomData;
 
 use futures_core::stream::BoxStream;
+use sqlx::postgres::PgRow;
 
 use crate::expr::Cond;
 use crate::query::{JoinClause, join_scope};
@@ -254,6 +259,82 @@ macro_rules! scoped_tuples {
 }
 
 scoped_tuples! {
+    (A IA, B IB),
+    (A IA, B IB, C IC),
+    (A IA, B IB, C IC, D ID),
+    (A IA, B IB, C IC, D ID, E IE),
+    (A IA, B IB, C IC, D ID, E IE, F IF),
+    (A IA, B IB, C IC, D ID, E IE, F IF, G IG),
+    (A IA, B IB, C IC, D ID, E IE, F IF, G IG, H IH),
+}
+
+/// Joined models fetched next to the root model with [`Joined::all_with`]:
+/// a model `N`, `Option<N>` (`None` when a `LEFT JOIN` found no match), or
+/// a tuple of up to 8 of those, each part of the query scope `S`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be fetched from this query",
+    label = "fetch joined models, `Option`s of them or tuples of those"
+)]
+pub trait JoinedModels<S, I> {
+    /// What each row decodes to.
+    type Output;
+    #[doc(hidden)]
+    fn write_columns(sql: &mut Sql);
+    #[doc(hidden)]
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Self::Output>;
+}
+
+impl<S, I, N: Model + InScope<S, I>> JoinedModels<S, I> for N {
+    type Output = N;
+    fn write_columns(sql: &mut Sql) {
+        sql.push(", ");
+        crate::model::push_columns::<N>(sql);
+    }
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<N> {
+        let model = N::from_row_at(row, *offset)?;
+        *offset += N::COLUMNS.len();
+        Ok(model)
+    }
+}
+
+impl<S, I, N: Model + InScope<S, I>> JoinedModels<S, I> for Option<N> {
+    type Output = Option<N>;
+    fn write_columns(sql: &mut Sql) {
+        <N as JoinedModels<S, I>>::write_columns(sql);
+    }
+    fn decode(row: &PgRow, offset: &mut usize) -> Result<Option<N>> {
+        use sqlx::{Row, ValueRef};
+        let mut missing = true;
+        for key in N::PRIMARY_KEYS {
+            let at = N::COLUMNS.iter().position(|c| c == key).unwrap_or(0);
+            missing &= row.try_get_raw(*offset + at)?.is_null();
+        }
+        if missing {
+            *offset += N::COLUMNS.len();
+            return Ok(None);
+        }
+        <N as JoinedModels<S, I>>::decode(row, offset).map(Some)
+    }
+}
+
+macro_rules! joined_model_tuples {
+    ($(($($t:ident $i:ident),+)),+ $(,)?) => {$(
+        impl<S, $($i,)+ $($t),+> JoinedModels<S, ($($i,)+)> for ($($t,)+)
+        where
+            $($t: JoinedModels<S, $i>,)+
+        {
+            type Output = ($($t::Output,)+);
+            fn write_columns(sql: &mut Sql) {
+                $($t::write_columns(sql);)+
+            }
+            fn decode(row: &PgRow, offset: &mut usize) -> Result<Self::Output> {
+                Ok(($($t::decode(row, offset)?,)+))
+            }
+        }
+    )+};
+}
+
+joined_model_tuples! {
     (A IA, B IB),
     (A IA, B IB, C IC),
     (A IA, B IB, C IC, D ID),
@@ -486,6 +567,51 @@ impl<M: Model, J> Joined<M, J> {
         per_page: u64,
     ) -> Result<Page<M>> {
         self.select.paginate(executor, page, per_page).await
+    }
+
+    /// Fetch the root models together with joined ones (RFC 0004): one
+    /// tuple per joined row, so a `has_many` join repeats the root model.
+    ///
+    /// ```ignore
+    /// let rows: Vec<(Post, User)> = Post::query()
+    ///     .join(Post::AUTHOR)
+    ///     .all_with::<User, _>(&db)
+    ///     .await?;
+    /// let rows: Vec<(Post, (User, Option<Category>))> = Post::query()
+    ///     .join(Post::AUTHOR)
+    ///     .left_join(Category::ID.on(Post::CATEGORY_ID))
+    ///     .all_with::<(User, Option<Category>), _>(&db)
+    ///     .await?;
+    /// ```
+    pub async fn all_with<'e, T, I>(
+        self,
+        executor: impl Executor<'e>,
+    ) -> Result<Vec<(M, T::Output)>>
+    where
+        T: JoinedModels<(M, J), I>,
+    {
+        let sql = self.with_sql::<T, I>();
+        let rows = crate::exec::fetch_rows(executor, &sql, &[], self.select.use_replica()).await?;
+        rows.iter()
+            .map(|row| {
+                let root = M::from_row_at(row, 0)?;
+                let mut offset = M::COLUMNS.len();
+                Ok((root, T::decode(row, &mut offset)?))
+            })
+            .collect()
+    }
+
+    /// Render the statement of [`all_with`](Self::all_with).
+    pub fn with_sql<T, I>(&self) -> Sql
+    where
+        T: JoinedModels<(M, J), I>,
+    {
+        let mut sql = self.select.new_sql();
+        sql.push("SELECT ");
+        crate::model::push_columns::<M>(&mut sql);
+        T::write_columns(&mut sql);
+        self.select.write_tail(&mut sql);
+        sql
     }
 
     /// Keyset pagination (see [`Select::cursor_paginate`]); sort keys may

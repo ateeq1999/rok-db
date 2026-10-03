@@ -170,11 +170,19 @@ The open questions were resolved by the maintainer:
 Scope of the first implementation: the typed builder (`Joined<M, J>`) with
 `join`/`left_join` from relations or ad-hoc column pairs, `filter`, `order_by`,
 `group_by`, `having`, `limit`, `offset`, `select(..)` across models, and `all`,
-`first`, `one`, `count`, `exists`, `paginate`, `stream`. Not yet: keyset
-pagination, memoization, `UPDATE … FROM` / `DELETE … USING` and self-joins.
+`first`, `one`, `count`, `exists`, `paginate`, `stream`.
+
+Added afterwards: `cursor_paginate` (sort keys are aliased in a wrapped subquery, which also
+allows expression orders), `memoize` (cache entries are invalidated by writes to any joined
+table), `update` / `delete` / `force_delete` / `restore` (implemented as
+`WHERE pk IN (SELECT root.pk FROM … JOIN …)` rather than `UPDATE … FROM`, so hooks-free
+bulk semantics and scopes stay the same), and tuples via [RFC 0004](0004-joined-tuples.md).
+Self-joins are still unsupported: see Future possibilities.
 
 # Future possibilities
 
-- Self-joins with aliases (`User::alias("manager")`).
-- `UPDATE … FROM` / `DELETE … USING`.
+- Self-joins with aliases (`User::alias("manager")`). These need a design of their own.
+  Columns are typed by model (`User::NAME`), so two instances of `User` in one query
+  need an aliased column type (for example `Aliased<User, Manager>`) that the scope
+  proofs, rendering and tuple decoding all understand.
 - Eager loading built on joins for `belongs_to` (one query instead of two).

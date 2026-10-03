@@ -422,12 +422,23 @@ let per_user: Vec<(String, i64)> = User::query()
     .await?;
 Post::query().left_join(Category::ID.on(Post::CATEGORY_ID));
 Comment::query().join(Comment::POST).join(Post::AUTHOR).filter(User::ROLE.eq("admin"));
+
+// Whole models as tuples (RFC 0004); `Option` for LEFT JOINs.
+let rows: Vec<(Post, (User, Option<Category>))> = Post::query()
+    .join(Post::AUTHOR)
+    .left_join(Category::ID.on(Post::CATEGORY_ID))
+    .all_with::<(User, Option<Category>), _>(&db)
+    .await?;
+
+// Keyset pagination, caching and bulk writes work through joins too.
+let page = Post::query().join(Post::AUTHOR).order_by(User::NAME).cursor_paginate(&db, None, 50).await?;
+Post::query().join(Post::AUTHOR).filter(User::ROLE.eq("banned")).delete(&db).await?;
 ```
 
 Using a column of a model that isn't part of the query is a compile error. Joined models'
-tenant, soft-delete and default scopes apply in the `ON` clause. See
-[RFC 0001](docs/rfcs/0001-joins.md) for the design; keyset pagination, memoization, bulk
-update/delete through joins and fetching `(Post, User)` tuples are not supported yet.
+tenant, soft-delete and default scopes apply in the `ON` clause. Memoized joined queries are
+invalidated by writes to any of their tables. See [RFC 0001](docs/rfcs/0001-joins.md) for
+the design. Self-joins (the same table twice) are not supported yet.
 
 ### Custom column types
 

@@ -134,6 +134,18 @@ pub trait Model:
         Ok(())
     }
 
+    /// Decode the model from [`COLUMNS`](Model::COLUMNS) starting at
+    /// position `offset` of `row` (used to fetch joined models as tuples).
+    /// The derive generates it; without `FromRow` from the derive it fails.
+    #[doc(hidden)]
+    fn from_row_at(row: &PgRow, offset: usize) -> std::result::Result<Self, sqlx::Error> {
+        let _ = (row, offset);
+        Err(sqlx::Error::ColumnNotFound(format!(
+            "`{}` can't be decoded by position (it uses `#[rok(no_from_row)]`)",
+            Self::TABLE
+        )))
+    }
+
     /// A condition applied to every query of this model (like soft deletes),
     /// set with `#[rok(default_scope = path::to::fn)]`. Remove it per query
     /// with [`Select::unscoped`].

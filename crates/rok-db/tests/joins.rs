@@ -425,3 +425,64 @@ async fn joined_memoize(db: Db) {
         .unwrap();
     assert_eq!(admin_posts().count(&db).await.unwrap(), 4);
 }
+
+#[test]
+fn tuple_sql_shape() {
+    let sql = Post::query()
+        .join(Post::AUTHOR)
+        .order_by(Post::ID)
+        .with_sql::<User, _>();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT "posts"."id", "posts"."author_id", "posts"."category_id", "posts"."title", "posts"."views", "posts"."deleted_at", "users"."id", "users"."name", "users"."role" FROM "posts" INNER JOIN "users" ON "users"."id" = "posts"."author_id" WHERE "posts"."deleted_at" IS NULL ORDER BY "posts"."id" ASC"#
+    );
+}
+
+#[rok_db::test]
+async fn fetch_joined_tuples(db: Db) {
+    let (users, posts) = seed(&db).await;
+    let rows: Vec<(Post, User)> = Post::query()
+        .join(Post::AUTHOR)
+        .order_by(Post::ID)
+        .all_with::<User, _>(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0], (posts[0].clone(), users[0].clone()));
+    assert_eq!(rows[3], (posts[3].clone(), users[1].clone()));
+
+    // Several models; a LEFT JOIN without a match gives `None`.
+    let rows: Vec<(Post, (User, Option<Category>))> = Post::query()
+        .join(Post::AUTHOR)
+        .left_join(Category::ID.on(Post::CATEGORY_ID))
+        .order_by(Post::ID)
+        .all_with::<(User, Option<Category>), _>(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].1.1.as_ref().map(|c| c.name.as_str()), Some("rust"));
+    assert!(rows[1].1.1.is_none());
+    assert_eq!(rows[1].1.0.name, "ann");
+
+    // has_many: one tuple per pair, users without posts kept as `None`.
+    let rows: Vec<(User, Option<Post>)> = User::query()
+        .left_join(User::POSTS)
+        .order_by(User::ID)
+        .order_by(Post::ID.asc().nulls_last())
+        .all_with::<Option<Post>, _>(&db)
+        .await
+        .unwrap();
+    let pairs: Vec<(&str, Option<&str>)> = rows
+        .iter()
+        .map(|(u, p)| (u.name.as_str(), p.as_ref().map(|p| p.title.as_str())))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("ann", Some("a1")),
+            ("ann", Some("a2")),
+            ("bob", Some("b1")),
+            ("bob", Some("b2")),
+            ("cid", None),
+        ]
+    );
+}
