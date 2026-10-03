@@ -5,6 +5,7 @@
 
 mod cache;
 mod context;
+mod cursor;
 mod db;
 mod error;
 mod exec;
@@ -19,12 +20,13 @@ mod value;
 
 pub use cache::{CacheStats, QueryCache};
 pub use context::Executor;
+pub use cursor::{Cursor, CursorPage};
 pub use db::{Db, DbBuilder, Tx};
 pub use error::{Error, Result};
 pub use expr::{Column, Direction, Expr, IntoProjections, Order, Projection};
 pub use model::Model;
 pub use page::Page;
-pub use query::{Insert, Memoized, Projected, Select, Update};
+pub use query::{Insert, InsertMany, Memoized, Projected, Select, Update};
 pub use raw::{Raw, raw};
 pub use relation::{BelongsTo, HasMany, HasOne};
 pub use sql::Sql;
@@ -44,7 +46,7 @@ pub use sqlx;
 pub mod __private {
     pub use crate::context::Context;
     pub use crate::model::__insert_sql;
-    pub use crate::query::__paginate_sql;
+    pub use crate::query::{__cursor_sql, __paginate_sql};
     pub use sqlx::postgres::PgRow;
     pub use sqlx::{Error as SqlxError, FromRow, Row};
 }

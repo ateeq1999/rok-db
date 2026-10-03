@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Keyset pagination: `Select::cursor_paginate` returning a `CursorPage`
+  with an opaque, URL-safe `Cursor` (mixed sort directions, primary-key
+  tiebreaker).
+- Soft deletes: `#[rok(soft_delete)]` / `#[rok(deleted_at)]`; queries,
+  counts, relations and subqueries skip deleted rows; `with_trashed`,
+  `only_trashed`, `restore`, `force_delete` and `Model::is_trashed`.
+- Optimistic locking: `#[rok(version)]`; `save` and `delete` detect stale
+  records in one round trip and fail with `Error::Conflict`
+  (`Error::is_conflict`); bulk updates and upserts increment the version.
+- Configurable upserts: `Model::upsert_on`, `Model::insert_many` and
+  `Insert::{on_conflict, on_constraint, do_nothing, do_update,
+  do_update_all, exec_optional}`.
+- Subqueries: `Column::in_subquery`, `Column::not_in_subquery`,
+  `Expr::exists`, `Expr::not_exists` and `Column::eq_outer` for correlated
+  subqueries.
+- RFC 0001 proposing typed joins.
+
 - Relations: `#[rok(belongs_to = …)]`, `#[rok(has_many(…))]` and
   `#[rok(has_one(…))]` generate `BelongsTo`/`HasMany`/`HasOne` constants
   and lazy query methods; `load`/`load_from` eager-load related records for

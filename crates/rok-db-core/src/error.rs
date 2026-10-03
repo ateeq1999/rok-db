@@ -16,6 +16,21 @@ pub enum Error {
         key: Option<String>,
     },
 
+    /// An optimistic-locking check failed: the record was changed by someone
+    /// else since it was loaded (its `#[rok(version)]` column no longer
+    /// matches). Reload the record and retry.
+    #[error("`{table}` record with primary key {key} was modified concurrently")]
+    Conflict {
+        /// Table that was written.
+        table: &'static str,
+        /// Primary key of the record.
+        key: String,
+    },
+
+    /// A pagination cursor could not be decoded.
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
+
     /// Binding a parameter to the query failed.
     #[error("failed to encode query parameter: {0}")]
     Encode(#[source] sqlx::error::BoxDynError),
@@ -45,6 +60,11 @@ impl Error {
             self,
             Error::NotFound { .. } | Error::Database(sqlx::Error::RowNotFound)
         )
+    }
+
+    /// `true` if this is an optimistic-locking [`Error::Conflict`].
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Error::Conflict { .. })
     }
 
     /// `true` if the database rejected the query because of a unique constraint.

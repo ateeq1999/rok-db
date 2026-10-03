@@ -97,13 +97,15 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 |---|---|---|
 | `table = "name"` | struct | table name (default: snake_case plural) |
 | `timestamps` | struct | manage `created_at` / `updated_at` automatically |
+| `soft_delete` | struct | `deleted_at` marks rows deleted; queries skip them |
 | `has_many(posts = Post::USER_ID)` | struct | one-to-many relation → `User::POSTS`, `user.posts()` |
 | `has_one(profile = Profile::USER_ID)` | struct | one-to-one relation → `User::PROFILE`, `user.profile()` |
 | `primary_key` | field | primary key (default: `id`) |
 | `generated` | field | filled in by the database; never written |
 | `column = "name"` | field | column name differs from the field |
 | `skip` | field | not a column |
-| `created_at` / `updated_at` | field | managed timestamp with a custom name |
+| `created_at` / `updated_at` / `deleted_at` | field | managed column with a custom name |
+| `version` | field | optimistic-locking counter |
 | `belongs_to = User` | field | `user_id` → `Post::USER`, `post.user()` (or `belongs_to(author = User)`) |
 
 ## API overview
@@ -122,6 +124,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `insert(db)` | insert (skipping `generated` columns), returns stored row |
 | `save(db)` | update by primary key, returns stored row |
 | `upsert(db)` | `INSERT … ON CONFLICT (pk) DO UPDATE` |
+| `upsert_on(db, [User::EMAIL])` | upsert on a unique column |
+| `force_delete(db)`, `restore(db)`, `is_trashed()` | soft deletes |
 | `delete(db)` | delete by primary key |
 | `reload(db)` | re-read from the database |
 
@@ -130,6 +134,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `filter`, `filter_opt`, `filter_if` | `WHERE` (combined with `AND`) |
 | `order_by`, `limit`, `offset`, `for_update`, `for_share` | |
 | `all`, `first`, `one`, `count`, `exists` | run it |
+| `cursor_paginate(db, after, limit)` | keyset pagination with an opaque cursor |
+| `with_trashed()`, `only_trashed()`, `force_delete(db)`, `restore(db)` | soft deletes |
 | `paginate(db, page, per_page)` | `Page<T>` with `total`, `total_pages()`, `has_next()` — one round trip |
 | `update().set(..)/increment(..)/set_raw(..)` | turn into a bulk `UPDATE` |
 | `delete(db)` | bulk `DELETE` |
@@ -139,8 +145,8 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `memoize(ttl)` | cache the result (see below) |
 | `to_sql()` | inspect the generated SQL and parameters |
 
-Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in between is_null is_not_null asc desc`.
-Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, or `Expr::raw("lower(email) = ?", [v])`.
+Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in in_subquery not_in_subquery eq_outer between is_null is_not_null asc desc`.
+Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, `Expr::exists(..)`, `Expr::not_exists(..)`, or `Expr::raw("lower(email) = ?", [v])`.
 
 ### Relations
 
@@ -264,6 +270,94 @@ let db = Db::builder().slow_query_threshold(Duration::from_millis(200)).connect(
 // e.g. RUST_LOG=rok_db=debug with tracing-subscriber's EnvFilter
 ```
 
+### Keyset pagination
+
+Offset pagination (`paginate`) gets slower with every page and can skip or repeat rows when
+data changes between requests. Keyset pagination doesn't:
+
+```rust
+let page = Post::order_by(Post::CREATED_AT.desc())
+    .cursor_paginate(&db, None, 20)          // first page
+    .await?;
+let token: Option<String> = page.next.map(|c| c.to_string());   // opaque, URL-safe
+
+// next request
+let cursor: rok_db::Cursor = token.unwrap().parse()?;
+let page = Post::order_by(Post::CREATED_AT.desc())
+    .cursor_paginate(&db, Some(&cursor), 20)
+    .await?;
+```
+
+The primary key is added as a tiebreaker automatically; ordering columns must be `NOT NULL`.
+
+### Soft deletes
+
+```rust
+#[derive(Model)]
+#[rok(soft_delete)]
+struct Doc { id: i64, title: String, deleted_at: Option<DateTime<Utc>> }
+
+doc.delete(&db).await?;                    // UPDATE … SET deleted_at = now()
+Doc::all(&db).await?;                       // skips deleted rows (also count, find, relations, subqueries)
+Doc::query().with_trashed().all(&db).await?;
+Doc::query().only_trashed().restore(&db).await?;
+doc.force_delete(&db).await?;              // real DELETE
+```
+
+### Optimistic locking
+
+```rust
+#[derive(Model)]
+struct Account { id: i64, balance: i64, #[rok(version)] version: i32 }
+
+let mut account = Account::find_or_fail(&db, 1).await?;
+account.balance += 10;
+match account.save(&db).await {
+    Ok(saved) => { /* saved.version was incremented */ }
+    Err(e) if e.is_conflict() => { /* someone else saved first: reload and retry */ }
+    Err(e) => return Err(e),
+}
+```
+
+`save` and `delete` check the version in the same statement (no extra round trip), and bulk
+updates and upserts increment it too.
+
+### Upserts
+
+```rust
+user.upsert(&db).await?;                                   // ON CONFLICT (id) DO UPDATE …
+user.upsert_on(&db, [User::EMAIL]).await?;                 // ON CONFLICT (email) DO UPDATE …
+
+User::insert_many(&users)
+    .on_conflict([User::EMAIL])
+    .do_update([User::NAME])                               // or .do_update_all() / .do_nothing()
+    .exec(&db)
+    .await?;                                               // returns inserted + updated rows
+
+let created: Option<User> = User::create()
+    .set(User::EMAIL, "ann@example.com")
+    .on_constraint("users_email_key")
+    .do_nothing()
+    .exec_optional(&db)                                    // None if it already existed
+    .await?;
+```
+
+### Subqueries
+
+```rust
+// IN (subquery)
+let authors = User::filter(User::ID.in_subquery(
+    Post::filter(Post::VIEWS.gt(100)).select(Post::AUTHOR_ID),
+)).all(&db).await?;
+
+// Correlated EXISTS / NOT EXISTS
+let without_posts = User::filter(Expr::not_exists(
+    Post::filter(Post::AUTHOR_ID.eq_outer(User::ID)),
+)).all(&db).await?;
+```
+
+Joins are designed in [RFC 0001](docs/rfcs/0001-joins.md) and not implemented yet.
+
 ### Transactions
 
 ```rust
@@ -292,7 +386,7 @@ let total: i64 = rok_db::raw("SELECT COUNT(*) FROM users").scalar(&db).await?;
 
 ### Errors
 
-`rok_db::Error` has helpers for the common cases: `is_not_found()`, `is_unique_violation()`, `is_foreign_key_violation()` and `constraint()`.
+`rok_db::Error` has helpers for the common cases: `is_not_found()`, `is_conflict()`, `is_unique_violation()`, `is_foreign_key_violation()` and `constraint()`.
 
 ## Crates
 

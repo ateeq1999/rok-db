@@ -17,6 +17,9 @@ use syn::{Data, DeriveInput, Fields, Ident, LitStr, Path, parse_macro_input, spa
 /// - `#[rok(timestamps)]` — the `created_at` and `updated_at` fields are
 ///   managed automatically: both are set to `now()` on insert and
 ///   `updated_at` on every update.
+/// - `#[rok(soft_delete)]` — the `deleted_at` field (an `Option` timestamp)
+///   marks deleted rows: `delete` sets it, queries skip such rows unless
+///   `with_trashed()`/`only_trashed()` is used, and `restore` clears it.
 /// - `#[rok(has_many(posts = Post::USER_ID))]` — a one-to-many relation:
 ///   generates `User::POSTS` (a [`HasMany`]) and `user.posts()` (a query).
 /// - `#[rok(has_one(profile = Profile::USER_ID))]` — a one-to-one relation:
@@ -34,6 +37,10 @@ use syn::{Data, DeriveInput, Fields, Ident, LitStr, Path, parse_macro_input, spa
 /// - `#[rok(skip)]` — not a column; initialised with `Default::default()`.
 /// - `#[rok(created_at)]` / `#[rok(updated_at)]` — managed timestamp column
 ///   with a custom name (see `timestamps`).
+/// - `#[rok(deleted_at)]` — soft-delete column with a custom name.
+/// - `#[rok(version)]` — optimistic-locking counter (an integer): every
+///   update increments it, and `save`/`delete` fail with a conflict error if
+///   it changed since the record was loaded.
 /// - `#[rok(belongs_to = User)]` on a foreign key field `user_id` — generates
 ///   `Post::USER` (a [`BelongsTo`]) and `post.user()`. Use
 ///   `#[rok(belongs_to(author = User))]` to pick the name.
@@ -68,6 +75,8 @@ struct Field {
     skip: bool,
     created_at: bool,
     updated_at: bool,
+    deleted_at: bool,
+    version: bool,
     belongs_to: Option<(Ident, Path)>,
 }
 
@@ -121,6 +130,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 
     let mut table = None;
     let mut timestamps = false;
+    let mut soft_delete = false;
     let mut relations = Vec::new();
     let mut from_row = true;
     let mut krate: Option<Path> = None;
@@ -130,6 +140,8 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
                 table = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("timestamps") {
                 timestamps = true;
+            } else if meta.path.is_ident("soft_delete") {
+                soft_delete = true;
             } else if meta.path.is_ident("has_many") {
                 parse_relations(&meta, "HasMany", &mut relations)?;
             } else if meta.path.is_ident("has_one") {
@@ -171,7 +183,11 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
         })?,
     };
 
-    let find_ts = |flag: fn(&Field) -> bool, default: &str| -> syn::Result<Option<String>> {
+    let find_ts = |flag: fn(&Field) -> bool,
+                   default: &str,
+                   implied: bool,
+                   container: &str|
+     -> syn::Result<Option<String>> {
         let mut marked = columns.iter().filter(|f| flag(f));
         match (marked.next(), marked.next()) {
             (Some(_), Some(second)) => Err(syn::Error::new(
@@ -179,27 +195,31 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
                 format!("only one field can be `#[rok({default})]`"),
             )),
             (Some(f), None) => Ok(Some(f.column.clone())),
-            (None, _) if timestamps => columns
+            (None, _) if implied => columns
                 .iter()
                 .find(|f| f.ident == default)
                 .map(|f| Some(f.column.clone()))
                 .ok_or_else(|| {
                     syn::Error::new(
                         name.span(),
-                        format!("`#[rok(timestamps)]` requires a `{default}` field (or mark one with `#[rok({default})]`)"),
+                        format!("`#[rok({container})]` requires a `{default}` field (or mark one with `#[rok({default})]`)"),
                     )
                 }),
             (None, _) => Ok(None),
         }
     };
-    let created_at = find_ts(|f| f.created_at, "created_at")?;
-    let updated_at = find_ts(|f| f.updated_at, "updated_at")?;
+    let created_at = find_ts(|f| f.created_at, "created_at", timestamps, "timestamps")?;
+    let updated_at = find_ts(|f| f.updated_at, "updated_at", timestamps, "timestamps")?;
+    let deleted_at = find_ts(|f| f.deleted_at, "deleted_at", soft_delete, "soft_delete")?;
+    let version = find_ts(|f| f.version, "version", false, "")?;
     let opt = |v: Option<String>| match v {
         Some(c) => quote!(::core::option::Option::Some(#c)),
         None => quote!(::core::option::Option::None),
     };
     let created_at = opt(created_at);
     let updated_at = opt(updated_at);
+    let deleted_at = opt(deleted_at);
+    let version = opt(version);
 
     let value_arms = columns.iter().map(|f| {
         let ident = &f.ident;
@@ -295,6 +315,8 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             const GENERATED: &'static [&'static str] = &[#(#generated),*];
             const CREATED_AT_COLUMN: ::core::option::Option<&'static str> = #created_at;
             const UPDATED_AT_COLUMN: ::core::option::Option<&'static str> = #updated_at;
+            const DELETED_AT_COLUMN: ::core::option::Option<&'static str> = #deleted_at;
+            const VERSION_COLUMN: ::core::option::Option<&'static str> = #version;
 
             fn primary_key(&self) -> #krate::Value {
                 #krate::Value::from(&self.#pk_ident)
@@ -344,6 +366,8 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
             skip: false,
             created_at: false,
             updated_at: false,
+            deleted_at: false,
+            version: false,
             belongs_to: None,
         };
         for attr in field.attrs.iter().filter(|a| a.path().is_ident("rok")) {
@@ -358,6 +382,10 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
                     f.created_at = true;
                 } else if meta.path.is_ident("updated_at") {
                     f.updated_at = true;
+                } else if meta.path.is_ident("deleted_at") {
+                    f.deleted_at = true;
+                } else if meta.path.is_ident("version") {
+                    f.version = true;
                 } else if meta.path.is_ident("belongs_to") {
                     if meta.input.peek(syn::Token![=]) {
                         let model: Path = meta.value()?.parse()?;
@@ -382,28 +410,23 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
                     f.column = meta.value()?.parse::<LitStr>()?.value();
                 } else {
                     return Err(meta.error(
-                        "unknown `rok` attribute; expected `primary_key`, `generated`, `column`, `skip`, `created_at`, `updated_at` or `belongs_to`",
+                        "unknown `rok` attribute; expected `primary_key`, `generated`, `column`, `skip`, `created_at`, `updated_at`, `deleted_at`, `version` or `belongs_to`",
                     ));
                 }
                 Ok(())
             })?;
         }
-        if f.skip
-            && (f.primary_key
-                || f.generated
-                || f.created_at
-                || f.updated_at
-                || f.belongs_to.is_some())
-        {
+        let managed = f.created_at || f.updated_at || f.deleted_at || f.version;
+        if f.skip && (f.primary_key || f.generated || managed || f.belongs_to.is_some()) {
             return Err(syn::Error::new(
                 f.ident.span(),
                 "`skip` fields are not columns and can't have other `rok` attributes",
             ));
         }
-        if (f.created_at || f.updated_at) && f.generated {
+        if managed && f.generated {
             return Err(syn::Error::new(
                 f.ident.span(),
-                "timestamp columns are written by rok-db and can't be `generated`",
+                "managed columns (timestamps, `deleted_at`, `version`) are written by rok-db and can't be `generated`",
             ));
         }
         fields.push(f);
@@ -478,7 +501,13 @@ fn expand_from_row(input: DeriveInput) -> syn::Result<TokenStream2> {
     };
     let fields = parse_fields(&input, "FromRow")?;
     if let Some(f) = fields.iter().find(|f| {
-        f.primary_key || f.generated || f.created_at || f.updated_at || f.belongs_to.is_some()
+        f.primary_key
+            || f.generated
+            || f.created_at
+            || f.updated_at
+            || f.deleted_at
+            || f.version
+            || f.belongs_to.is_some()
     }) {
         return Err(syn::Error::new(
             f.ident.span(),

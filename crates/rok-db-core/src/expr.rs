@@ -2,8 +2,10 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Not;
 
-use crate::Value;
+use std::sync::Arc;
+
 use crate::sql::Sql;
+use crate::{Model, Projected, Select, Value};
 
 /// A column of model `M`.
 ///
@@ -113,6 +115,54 @@ impl<M> Column<M> {
             column: self.name,
             values: values.into_iter().map(Into::into).collect(),
             negated: true,
+        })
+    }
+
+    /// `column IN (subquery)`, where the subquery selects one column.
+    ///
+    /// ```ignore
+    /// // Users who wrote a post with more than 100 views.
+    /// User::filter(User::ID.in_subquery(
+    ///     Post::filter(Post::VIEWS.gt(100)).select(Post::AUTHOR_ID),
+    /// ))
+    /// ```
+    pub fn in_subquery<N: Model>(self, subquery: Projected<N>) -> Expr<M> {
+        Expr::new(Cond::Sub {
+            kind: SubKind::In {
+                column: self.name,
+                negated: false,
+            },
+            render: Render::new(move |sql| subquery.write_into(sql)),
+        })
+    }
+
+    /// `column NOT IN (subquery)`. Beware that `NOT IN` matches nothing if
+    /// the subquery returns any `NULL`; prefer [`Expr::not_exists`] then.
+    pub fn not_in_subquery<N: Model>(self, subquery: Projected<N>) -> Expr<M> {
+        Expr::new(Cond::Sub {
+            kind: SubKind::In {
+                column: self.name,
+                negated: true,
+            },
+            render: Render::new(move |sql| subquery.write_into(sql)),
+        })
+    }
+
+    /// Compare this column to a column of the *enclosing* query's model, for
+    /// correlated subqueries: `"posts"."author_id" = "users"."id"`.
+    ///
+    /// ```ignore
+    /// // Users with at least one post.
+    /// User::filter(Expr::exists(Post::filter(Post::AUTHOR_ID.eq_outer(User::ID))))
+    /// ```
+    pub fn eq_outer<O: Model>(self, outer: Column<O>) -> Expr<M>
+    where
+        M: Model,
+    {
+        Expr::new(Cond::Columns {
+            left: (M::TABLE, self.name),
+            op: "=",
+            right: (O::TABLE, outer.name),
         })
     }
 
@@ -258,6 +308,23 @@ impl<M> Expr<M> {
         Self::new(Cond::Or(Vec::new()))
     }
 
+    /// `EXISTS (subquery)`. Combine with [`Column::eq_outer`] to correlate
+    /// the subquery with the outer query.
+    pub fn exists<N: Model>(subquery: Select<N>) -> Self {
+        Self::new(Cond::Sub {
+            kind: SubKind::Exists { negated: false },
+            render: Render::new(move |sql| subquery.write_exists_body(sql)),
+        })
+    }
+
+    /// `NOT EXISTS (subquery)`.
+    pub fn not_exists<N: Model>(subquery: Select<N>) -> Self {
+        Self::new(Cond::Sub {
+            kind: SubKind::Exists { negated: true },
+            render: Render::new(move |sql| subquery.write_exists_body(sql)),
+        })
+    }
+
     /// Both `self` and `other` must hold.
     pub fn and(self, other: Expr<M>) -> Self {
         Self::new(match self.cond {
@@ -357,8 +424,42 @@ impl Term {
     }
 }
 
+/// Renders a subquery into the enclosing statement (sharing its parameter
+/// numbering).
+#[derive(Clone)]
+pub(crate) struct Render(Arc<dyn Fn(&mut Sql) + Send + Sync>);
+
+impl Render {
+    fn new(f: impl Fn(&mut Sql) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl fmt::Debug for Render {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sql = Sql::new();
+        (self.0)(&mut sql);
+        f.write_str(sql.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SubKind {
+    In { column: &'static str, negated: bool },
+    Exists { negated: bool },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Cond {
+    Sub {
+        kind: SubKind,
+        render: Render,
+    },
+    Columns {
+        left: (&'static str, &'static str),
+        op: &'static str,
+        right: (&'static str, &'static str),
+    },
     Cmp {
         term: Term,
         op: &'static str,
@@ -390,6 +491,24 @@ pub(crate) enum Cond {
 impl Cond {
     pub(crate) fn write(&self, sql: &mut Sql) {
         match self {
+            Cond::Sub { kind, render } => {
+                match kind {
+                    SubKind::In { column, negated } => {
+                        sql.push_ident(column)
+                            .push(if *negated { " NOT IN (" } else { " IN (" });
+                    }
+                    SubKind::Exists { negated } => {
+                        sql.push(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
+                    }
+                }
+                (render.0)(sql);
+                sql.push(")");
+            }
+            Cond::Columns { left, op, right } => {
+                sql.push_ident(left.0).push(".").push_ident(left.1);
+                sql.push(" ").push(op).push(" ");
+                sql.push_ident(right.0).push(".").push_ident(right.1);
+            }
             Cond::Cmp { term, op, value } => {
                 term.write(sql);
                 sql.push(" ").push(op).push(" ");

@@ -71,6 +71,16 @@
 //!   [`Select::group_by`], [`Select::having`] and [`Select::select`] with
 //!   [`Projection`]s, decoded into tuples or [`derive@FromRow`] structs.
 //! - **Timestamps**: `#[rok(timestamps)]` manages `created_at`/`updated_at`.
+//! - **Keyset pagination**: [`Select::cursor_paginate`] with opaque
+//!   [`Cursor`]s.
+//! - **Soft deletes**: `#[rok(soft_delete)]`, [`Select::with_trashed`],
+//!   [`Model::restore`], [`Model::force_delete`].
+//! - **Optimistic locking**: `#[rok(version)]`; stale writes fail with
+//!   [`Error::Conflict`].
+//! - **Upserts**: [`Model::upsert_on`], [`Model::insert_many`] and
+//!   [`Insert::on_conflict`] with `do_nothing`/`do_update`/`do_update_all`.
+//! - **Subqueries**: [`Column::in_subquery`], [`Expr::exists`] and
+//!   [`Column::eq_outer`] for correlation.
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`
