@@ -122,10 +122,12 @@ impl QueryCache {
         match fresh {
             Some(value) => {
                 inner.hits += 1;
+                crate::metrics::cache(true);
                 Some(value)
             }
             None => {
                 inner.misses += 1;
+                crate::metrics::cache(false);
                 inner.entries.remove(key);
                 None
             }

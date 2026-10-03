@@ -5,11 +5,13 @@
 
 mod cache;
 mod context;
+mod copy;
 mod cursor;
 mod db;
 mod error;
 mod exec;
 mod expr;
+pub mod metrics;
 mod model;
 mod page;
 mod query;
@@ -18,13 +20,16 @@ pub mod relation;
 mod sql;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod tracked;
 pub mod validate;
 mod value;
+pub mod web;
 
 pub use cache::{CacheStats, QueryCache};
 pub use context::Executor;
+pub use copy::CopyTarget;
 pub use cursor::{Cursor, CursorPage};
-pub use db::{Db, DbBuilder, Isolation, Retryable, Tx, TxOptions};
+pub use db::{Db, DbBuilder, Isolation, PoolStats, Retryable, Tx, TxOptions};
 pub use error::{Error, Result};
 pub use expr::{Column, Direction, Expr, IntoProjections, Order, Projection};
 pub use model::{Hooks, Model};
@@ -33,6 +38,7 @@ pub use query::{Insert, InsertMany, Memoized, Projected, Select, Update};
 pub use raw::{Raw, raw};
 pub use relation::{BelongsTo, HasMany, HasOne};
 pub use sql::Sql;
+pub use tracked::Tracked;
 pub use validate::ValidationErrors;
 pub use value::{CustomType, CustomValue, Value};
 

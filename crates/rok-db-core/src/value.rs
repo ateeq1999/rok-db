@@ -1,7 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use sqlx::postgres::PgArguments;
+use sqlx::encode::IsNull;
+use sqlx::postgres::{PgArgumentBuffer, PgArguments};
 use sqlx::{Arguments, Encode, Postgres, Type};
 
 use crate::Result;
@@ -101,6 +102,45 @@ impl Value {
         }
     }
 
+    /// Encode in PostgreSQL's binary format; `None` for `NULL`.
+    pub(crate) fn encode_binary(&self) -> Result<Option<Vec<u8>>> {
+        fn enc<T: for<'q> Encode<'q, Postgres>>(
+            v: &T,
+            buf: &mut PgArgumentBuffer,
+        ) -> std::result::Result<IsNull, sqlx::error::BoxDynError> {
+            v.encode_by_ref(buf)
+        }
+        let mut buf = PgArgumentBuffer::default();
+        let is_null = match self {
+            Value::Bool(v) => enc(v, &mut buf),
+            Value::I16(v) => enc(v, &mut buf),
+            Value::I32(v) => enc(v, &mut buf),
+            Value::I64(v) => enc(v, &mut buf),
+            Value::F32(v) => enc(v, &mut buf),
+            Value::F64(v) => enc(v, &mut buf),
+            Value::String(v) => enc(v, &mut buf),
+            Value::Bytes(v) => enc(v, &mut buf),
+            #[cfg(feature = "uuid")]
+            Value::Uuid(v) => enc(v, &mut buf),
+            #[cfg(feature = "chrono")]
+            Value::DateTime(v) => enc(v, &mut buf),
+            #[cfg(feature = "chrono")]
+            Value::NaiveDateTime(v) => enc(v, &mut buf),
+            #[cfg(feature = "chrono")]
+            Value::NaiveDate(v) => enc(v, &mut buf),
+            #[cfg(feature = "chrono")]
+            Value::NaiveTime(v) => enc(v, &mut buf),
+            #[cfg(feature = "json")]
+            Value::Json(v) => enc(v, &mut buf),
+            Value::Custom(v) => v.0.encode(&mut buf),
+        }
+        .map_err(crate::Error::Encode)?;
+        Ok(match is_null {
+            IsNull::Yes => None,
+            IsNull::No => Some(buf.to_vec()),
+        })
+    }
+
     pub(crate) fn bind(self, args: &mut PgArguments) -> Result<()> {
         let res = match self {
             Value::Bool(v) => args.add(v),
@@ -135,6 +175,10 @@ pub struct CustomValue(Arc<dyn DynValue>);
 
 trait DynValue: Send + Sync {
     fn bind(&self, args: &mut PgArguments) -> std::result::Result<(), sqlx::error::BoxDynError>;
+    fn encode(
+        &self,
+        buf: &mut PgArgumentBuffer,
+    ) -> std::result::Result<IsNull, sqlx::error::BoxDynError>;
     fn is_null(&self) -> bool;
     fn show(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -145,6 +189,13 @@ where
 {
     fn bind(&self, args: &mut PgArguments) -> std::result::Result<(), sqlx::error::BoxDynError> {
         args.add(self.clone())
+    }
+
+    fn encode(
+        &self,
+        buf: &mut PgArgumentBuffer,
+    ) -> std::result::Result<IsNull, sqlx::error::BoxDynError> {
+        Encode::<Postgres>::encode_by_ref(self, buf)
     }
 
     fn is_null(&self) -> bool {

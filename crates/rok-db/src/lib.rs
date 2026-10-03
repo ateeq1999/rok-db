@@ -88,6 +88,11 @@
 //! - **Scopes**: `#[rok(default_scope = …)]`, [`Select::scope`],
 //!   [`Select::unscoped`].
 //! - **Retrying transactions**: [`Db::transaction_with`] with [`TxOptions`].
+//! - **Change tracking**: [`Model::track`] / [`Tracked`] and
+//!   [`Model::save_only`].
+//! - **Bulk loading**: [`Model::copy_in`] with binary `COPY`.
+//! - **Web & metrics**: the [`web`] module (`serde`, `axum` features) and
+//!   [`metrics`] (`metrics` feature).
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`
@@ -116,7 +121,10 @@
 //! | `json`    | `serde_json::Value` and `sqlx::types::Json<T>` columns |
 //! | `migrate` | [`Db::migrate`] for running sqlx migrations          |
 //! | `testing` | [`macro@test`] and [`testing::TestDb`]: a temporary database per test |
-//! | `full`    | all of the above                                     |
+//! | `serde`   | `Serialize` for pages, cursors and validation errors |
+//! | `axum`    | [`Error`] implements axum's `IntoResponse` (implies `serde`) |
+//! | `metrics` | query, cache and pool metrics, see [`metrics`] |
+//! | `full`    | all of the above except `testing`                    |
 
 pub use rok_db_core::*;
 

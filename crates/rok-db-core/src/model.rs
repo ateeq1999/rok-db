@@ -258,6 +258,12 @@ pub trait Model:
         }
     }
 
+    /// Track changes to this record so [`Tracked::save`](crate::Tracked::save)
+    /// writes only modified columns.
+    fn track(self) -> crate::Tracked<Self> {
+        crate::Tracked::new(self)
+    }
+
     /// `true` if this record has been soft-deleted.
     fn is_trashed(&self) -> bool {
         Self::DELETED_AT_COLUMN
@@ -293,6 +299,30 @@ pub trait Model:
         E: Executor<'e>,
     {
         Self::insert_many(records).exec(executor)
+    }
+
+    /// Bulk-load `records` with PostgreSQL's binary `COPY`, typically 5–20×
+    /// faster than `INSERT` for large batches. Returns the number of rows
+    /// written.
+    ///
+    /// ```ignore
+    /// User::copy_in(&db, &users).await?;          // borrows a pooled connection
+    /// User::copy_in(&mut *tx, &users).await?;     // inside a transaction
+    /// ```
+    ///
+    /// Records are validated and passed to `before_insert` first;
+    /// `after_insert` is not called and nothing is returned, because `COPY`
+    /// doesn't return rows. Generated columns are skipped; every other value
+    /// (timestamps and `version` included) is written as-is. Binary `COPY`
+    /// needs each field's Rust type to match its column type exactly (e.g.
+    /// `i64` for `BIGINT`). The table's cached query results are invalidated
+    /// (except when copying through a plain `PgConnection`).
+    fn copy_in<'a>(
+        target: impl Into<crate::copy::CopyTarget<'a>>,
+        records: &[Self],
+    ) -> impl Future<Output = Result<u64>> + Send {
+        let target = target.into();
+        async move { crate::copy::copy_in(target, records).await }
     }
 
     /// `INSERT` this record, or update every column if its primary key
@@ -360,6 +390,27 @@ pub trait Model:
     where
         E: Executor<'e>,
     {
+        self.save_only(executor, None)
+    }
+
+    /// Like [`save`](Model::save), but only write `columns` (managed columns
+    /// such as `updated_at` and `version` are still maintained). Passing
+    /// `None` writes every column.
+    ///
+    /// ```ignore
+    /// user.save_only(&db, Some(vec![User::EMAIL])).await?;
+    /// ```
+    ///
+    /// [`Tracked`](crate::Tracked) uses this to write only changed fields.
+    fn save_only<'e, E>(
+        &self,
+        executor: E,
+        columns: Option<Vec<Column<Self>>>,
+    ) -> impl Future<Output = Result<Self>> + Send
+    where
+        E: Executor<'e>,
+    {
+        let only: Option<Vec<&'static str>> = columns.map(|c| c.iter().map(|c| c.name()).collect());
         let pre = self
             .validate()
             .map_err(Error::Validation)
@@ -371,6 +422,7 @@ pub trait Model:
         };
         let sets: Vec<_> = writable::<Self>(self.values())
             .filter(|(c, _)| !managed(c))
+            .filter(|(c, _)| only.as_ref().is_none_or(|only| only.contains(c)))
             .collect();
         let mut update = Self::update_all()
             .with_trashed()

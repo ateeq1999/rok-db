@@ -30,7 +30,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 | `json`    | `serde_json::Value` and `Json<T>` columns                 |
 | `migrate` | `Db::migrate("./migrations")`                            |
 | `testing` | `#[rok_db::test]`: a temporary database per test        |
-| `full`    | all of the above                                         |
+| `serde`   | `Serialize` for `Page`, `CursorPage`, `Cursor`, `ValidationErrors` |
+| `axum`    | `rok_db::Error` as an HTTP response (implies `serde`)    |
+| `metrics` | query, cache and pool metrics via the `metrics` crate    |
+| `full`    | all of the above except `testing`                        |
 
 ## Quick start
 
@@ -128,6 +131,9 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 |---|---|
 | `insert(db)` | insert (skipping `generated` columns), returns stored row |
 | `save(db)` | update by primary key, returns stored row |
+| `save_only(db, Some(vec![User::EMAIL]))` | update only some columns |
+| `track()` | `Tracked<M>`: save only what changed |
+| `Model::copy_in(db, &records)` | bulk load with binary `COPY` |
 | `upsert(db)` | `INSERT … ON CONFLICT (pk) DO UPDATE` |
 | `upsert_on(db, [User::EMAIL])` | upsert on a unique column |
 | `force_delete(db)`, `restore(db)`, `is_trashed()` | soft deletes |
@@ -432,6 +438,59 @@ Article::all(&db).await?;                                // only published
 Article::query().scope(popular).all(&db).await?;         // named scope
 Article::query().unscoped().count(&db).await?;           // everything
 ```
+
+### Change tracking
+
+```rust
+let mut user = User::find_or_fail(&db, 1).await?.track();
+user.name = "Ann".into();                  // Tracked<User> derefs to User
+user.changes();                            // [("name", "ann", "Ann")]
+user.save(&db).await?;                     // UPDATE users SET name = $1 … — only changed columns
+user.save(&db).await?;                     // nothing changed: no query
+```
+
+Writing only changed columns avoids clobbering concurrent edits to other columns.
+
+### Bulk loading with COPY
+
+```rust
+let rows: u64 = Event::copy_in(&db, &events).await?;      // or (&mut tx, …)
+```
+
+Uses PostgreSQL's binary `COPY`, typically 5–20× faster than `INSERT` for large batches. Records
+are validated first; generated columns are skipped; field types must match column types
+exactly (`i64` ↔ `BIGINT`). Nothing is returned (no `after_insert` hooks).
+
+### Web integration (axum)
+
+With the `axum` feature, rok-db errors are HTTP responses, so handlers can just use `?`:
+
+```rust
+async fn show(State(db): State<Db>, Path(id): Path<i64>) -> rok_db::Result<Json<User>> {
+    Ok(Json(User::find_or_fail(&db, id).await?))         // 404 {"error":"not_found",…}
+}
+
+async fn list(State(db): State<Db>, Query(q): Query<ListQuery>) -> rok_db::Result<Json<CursorPage<User>>> {
+    // `ListQuery { after: Option<Cursor> }` — cursors (de)serialize as strings
+    Ok(Json(User::order_by(User::ID).cursor_paginate(&db, q.after.as_ref(), 50).await?))
+}
+```
+
+| error | status |
+|---|---|
+| not found | 404 |
+| validation (with `fields`), hook rejection, foreign-key violation | 422 |
+| optimistic-lock conflict, unique violation | 409 |
+| invalid cursor | 400 |
+| anything else | 500 (details logged, never returned) |
+
+### Metrics
+
+With the `metrics` feature, install any [`metrics`](https://docs.rs/metrics) recorder (Prometheus,
+StatsD, OpenTelemetry…) and rok-db reports `rok_db_queries_total{kind,outcome}`,
+`rok_db_query_duration_seconds{kind}`, `rok_db_slow_queries_total`, `rok_db_rows_total`,
+`rok_db_cache_requests_total{result}` and, via `db.record_pool_metrics()`,
+`rok_db_pool_connections{state}`. `db.stats()` gives a pool snapshot without the feature.
 
 ### Retrying transactions
 

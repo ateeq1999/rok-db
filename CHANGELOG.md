@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Change tracking: `Model::track` returns a `Tracked<M>` whose `save` writes
+  only changed columns (or nothing); `changes`, `is_dirty`, `is_changed`,
+  `mark_clean`. `Model::save_only` updates selected columns.
+- Bulk loading: `Model::copy_in` streams records with binary
+  `COPY … FROM STDIN` through a pool, transaction or connection
+  (`CopyTarget`), validating first and invalidating the query cache.
+- Web integration: feature `serde` (`Serialize` for `Page`, `CursorPage`,
+  `ValidationErrors`; `Cursor` as a string) and feature `axum`
+  (`Error: IntoResponse` with JSON bodies and `Error::http_status`).
+- Metrics (feature `metrics`): query counts, durations, rows, slow queries,
+  cache hits/misses and pool gauges through the `metrics` crate;
+  `Db::stats` / `PoolStats` and `Db::record_pool_metrics`.
+
 - Custom column types: `#[derive(DbEnum)]` (TEXT or native PostgreSQL
   enums, with `rename`/`rename_all`), `#[derive(DbNewtype)]`,
   `impl_value!`, `Value::Custom` / `Value::custom` and the `CustomType`

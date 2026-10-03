@@ -41,15 +41,17 @@ impl<'a> Probe<'a> {
         let elapsed = self.start.elapsed();
         let ms = elapsed.as_secs_f64() * 1000.0;
         let sql = self.sql.as_str();
+        let slow = self
+            .ctx
+            .as_ref()
+            .map_or(DEFAULT_SLOW_QUERY, |c| c.slow_query);
+        let is_slow = slow > Duration::ZERO && elapsed >= slow;
         match result {
             Ok(value) => {
                 let rows = rows(value);
+                crate::metrics::query(sql, elapsed, Some(rows), is_slow);
                 tracing::debug!(target: "rok_db::query", sql, elapsed_ms = ms, rows, "query");
-                let slow = self
-                    .ctx
-                    .as_ref()
-                    .map_or(DEFAULT_SLOW_QUERY, |c| c.slow_query);
-                if slow > Duration::ZERO && elapsed >= slow {
+                if is_slow {
                     tracing::warn!(target: "rok_db::slow_query", sql, elapsed_ms = ms, rows, threshold_ms = slow.as_millis() as u64, "slow query");
                 }
                 if let Some(cache) = self.ctx.as_ref().and_then(|c| c.cache.as_ref()) {
@@ -59,6 +61,7 @@ impl<'a> Probe<'a> {
                 }
             }
             Err(error) => {
+                crate::metrics::query(sql, elapsed, None, is_slow);
                 tracing::debug!(target: "rok_db::query", sql, elapsed_ms = ms, %error, "query failed");
             }
         }

@@ -53,6 +53,23 @@ impl Db {
         }
     }
 
+    /// A snapshot of the connection pool's state.
+    pub fn stats(&self) -> PoolStats {
+        PoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle(),
+            max_connections: self.pool.options().get_max_connections(),
+        }
+    }
+
+    /// Report [`stats`](Self::stats) as `rok_db_pool_connections` gauges
+    /// (feature `metrics`). Call it periodically, e.g. from a background
+    /// task or before each metrics scrape.
+    #[cfg(feature = "metrics")]
+    pub fn record_pool_metrics(&self) {
+        crate::metrics::pool(self.stats());
+    }
+
     /// The query cache, if enabled with [`DbBuilder::query_cache`].
     pub fn cache(&self) -> Option<&QueryCache> {
         self.ctx.cache.as_ref()
@@ -223,6 +240,17 @@ impl fmt::Debug for Db {
             .field("cache", &self.ctx.cache)
             .finish()
     }
+}
+
+/// Connection pool statistics, from [`Db::stats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStats {
+    /// Open connections (idle and in use).
+    pub size: u32,
+    /// Idle connections.
+    pub idle: usize,
+    /// Configured maximum.
+    pub max_connections: u32,
 }
 
 /// Transaction isolation level, see [`TxOptions::isolation`].
@@ -465,6 +493,17 @@ impl Tx {
     /// The underlying sqlx transaction.
     pub fn inner(&mut self) -> &mut sqlx::Transaction<'static, Postgres> {
         &mut self.inner
+    }
+
+    /// Record a write to `table` made outside the executor path (e.g. COPY).
+    pub(crate) fn note_write(&self, table: &'static str) {
+        let mut touched = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        if !touched.contains(&table) {
+            touched.push(table);
+        }
+        if let Some(cache) = self.ctx.as_ref().and_then(|c| c.cache.as_ref()) {
+            cache.invalidate(table);
+        }
     }
 }
 

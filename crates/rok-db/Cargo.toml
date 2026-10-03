@@ -20,7 +20,10 @@ uuid = ["rok-db-core/uuid"]
 json = ["rok-db-core/json"]
 migrate = ["rok-db-core/migrate"]
 testing = ["rok-db-core/testing"]
-full = ["chrono", "uuid", "json", "migrate"]
+serde = ["rok-db-core/serde"]
+axum = ["rok-db-core/axum"]
+metrics = ["rok-db-core/metrics"]
+full = ["chrono", "uuid", "json", "migrate", "serde", "axum", "metrics"]
 
 [dependencies]
 rok-db-core = { workspace = true }
@@ -31,6 +34,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+serde_json = "1"
+axum-core = "0.5"
+http-body-util = "0.1"
+metrics = "0.24"
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 
 [package.metadata.docs.rs]
 all-features = true
