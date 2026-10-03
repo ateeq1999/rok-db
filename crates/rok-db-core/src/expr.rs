@@ -584,7 +584,7 @@ impl Term {
 pub(crate) struct Render(Arc<dyn Fn(&mut Sql) + Send + Sync>);
 
 impl Render {
-    fn new(f: impl Fn(&mut Sql) + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(f: impl Fn(&mut Sql) + Send + Sync + 'static) -> Self {
         Self(Arc::new(f))
     }
 }
@@ -599,6 +599,11 @@ impl fmt::Debug for Render {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SubKind {
+    /// `(a, b) IN (subquery)` for composite keys.
+    InRow {
+        table: &'static str,
+        columns: &'static [&'static str],
+    },
     In {
         table: &'static str,
         column: &'static str,
@@ -656,6 +661,13 @@ impl Cond {
         match self {
             Cond::Sub { kind, render } => {
                 match kind {
+                    SubKind::InRow { table, columns } => {
+                        sql.push("(")
+                            .push_list(columns.iter(), ", ", |sql, c| {
+                                sql.push_column(table, c);
+                            })
+                            .push(") IN (");
+                    }
                     SubKind::In {
                         table,
                         column,

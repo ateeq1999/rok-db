@@ -36,8 +36,7 @@
 //! need one in a joined `select`: write `Projection::<Post>::count_all()`
 //! or a column aggregate such as `Post::ID.count()`.
 //!
-//! Not supported yet: keyset pagination, memoization, bulk update/delete,
-//! self-joins and fetching joined models as tuples.
+//! Not supported: self-joins (the same table twice).
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -48,7 +47,7 @@ use crate::expr::Cond;
 use crate::query::{JoinClause, join_scope};
 use crate::relation::{BelongsTo, HasMany, HasOne};
 use crate::{
-    Column, Executor, Expr, Model, Order, Page, Projected, Projection, Result, Select, Sql,
+    Column, Executor, Expr, Model, Order, Page, Projected, Projection, Result, Select, Sql, Update,
 };
 
 /// Index markers proving a model is part of a joined query. Inferred by the
@@ -408,6 +407,47 @@ impl<M: Model, J> Joined<M, J> {
         }
     }
 
+    /// Turn into a bulk `UPDATE` of the matching root rows (`SET` root
+    /// columns only):
+    ///
+    /// ```ignore
+    /// Post::query().join(Post::AUTHOR).filter(User::BANNED.eq(true))
+    ///     .update().set(Post::HIDDEN, true).exec(&db).await?;
+    /// ```
+    ///
+    /// Rendered as `UPDATE posts SET … WHERE id IN (SELECT posts.id FROM
+    /// posts JOIN … WHERE …)`.
+    pub fn update(self) -> Update<M> {
+        self.select.key_subselect().update()
+    }
+
+    /// Delete the matching root rows (soft delete for soft-delete models).
+    pub async fn delete<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
+        self.select.key_subselect().delete(executor).await
+    }
+
+    /// Permanently delete the matching root rows.
+    pub async fn force_delete<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
+        self.select.key_subselect().force_delete(executor).await
+    }
+
+    /// Restore the matching soft-deleted root rows (combine with
+    /// [`with_trashed`](Self::with_trashed)).
+    pub async fn restore<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
+        self.select.key_subselect().restore(executor).await
+    }
+
+    /// Cache this query's results (see [`Select::memoize`]); writes to the
+    /// root **or any joined table** invalidate them.
+    pub fn memoize(self, ttl: std::time::Duration) -> crate::Memoized<M> {
+        self.select.memoize(ttl)
+    }
+
+    #[doc(hidden)]
+    pub fn into_select(self) -> Select<M> {
+        self.select
+    }
+
     /// Render the `SELECT` of root models.
     pub fn to_sql(&self) -> Sql {
         self.select.to_sql()
@@ -446,6 +486,17 @@ impl<M: Model, J> Joined<M, J> {
         per_page: u64,
     ) -> Result<Page<M>> {
         self.select.paginate(executor, page, per_page).await
+    }
+
+    /// Keyset pagination (see [`Select::cursor_paginate`]); sort keys may
+    /// come from joined models, and must be `NOT NULL`.
+    pub async fn cursor_paginate<'e, E: Executor<'e>>(
+        self,
+        executor: E,
+        after: Option<&crate::Cursor>,
+        limit: u64,
+    ) -> Result<crate::CursorPage<M>> {
+        self.select.cursor_paginate(executor, after, limit).await
     }
 
     /// Stream the matching root models.

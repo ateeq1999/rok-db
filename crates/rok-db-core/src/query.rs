@@ -727,6 +727,46 @@ impl<M: Model> Select<M> {
             .await
     }
 
+    /// Every table this query reads: the root and joined tables.
+    pub(crate) fn tables(&self) -> Vec<&'static str> {
+        std::iter::once(M::TABLE)
+            .chain(self.joins.iter().map(|j| j.table))
+            .collect()
+    }
+
+    /// A fresh `SELECT` of `M` restricted to the root rows this (joined)
+    /// query matches: `pk IN (SELECT root.pk FROM … JOIN … WHERE …)`.
+    /// Used for bulk writes through joins.
+    pub(crate) fn key_subselect(&self) -> Select<M> {
+        let inner = self.clone();
+        let render = crate::expr::Render::new(move |sql: &mut Sql| {
+            let previous = std::mem::replace(&mut sql.qualify, true);
+            sql.push("SELECT ");
+            Self::write_primary_keys(sql);
+            inner.write_from_where(sql);
+            sql.qualify = previous;
+        });
+        let kind = if M::PRIMARY_KEYS.len() == 1 {
+            crate::expr::SubKind::In {
+                table: M::TABLE,
+                column: M::PRIMARY_KEY,
+                negated: false,
+            }
+        } else {
+            crate::expr::SubKind::InRow {
+                table: M::TABLE,
+                columns: M::PRIMARY_KEYS,
+            }
+        };
+        Select {
+            filters: vec![Cond::Sub { kind, render }],
+            trashed: self.trashed,
+            scoped: self.scoped,
+            all_tenants: self.all_tenants,
+            ..Select::new()
+        }
+    }
+
     /// The ordering used for keyset pagination: the query's `ORDER BY`
     /// columns plus the primary key as a tiebreaker.
     fn keyset_order(&self) -> Vec<(&'static str, Direction)> {
@@ -772,6 +812,9 @@ impl<M: Model> Select<M> {
         if limit == 0 {
             return Err(Error::InvalidQuery("`limit` must be greater than 0".into()));
         }
+        if self.needs_wrapped_keyset() {
+            return self.wrapped_cursor_paginate(executor, after, limit).await;
+        }
         let select = self.cursor_select(after, limit)?;
         let order = select.keyset_order();
         let mut items = select.all(executor).await?;
@@ -793,12 +836,141 @@ impl<M: Model> Select<M> {
         Ok(CursorPage { items, next })
     }
 
-    fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
-        if self.order.iter().any(|o| o.column().is_none()) {
+    /// Joined queries and expression orders paginate over aliased sort keys.
+    fn needs_wrapped_keyset(&self) -> bool {
+        !self.joins.is_empty() || self.order.iter().any(|o| o.column().is_none())
+    }
+
+    /// The order with the root primary key appended as a tiebreaker.
+    fn keyset_orders(&self) -> Vec<Order<M>> {
+        let mut order = self.order.clone();
+        for key in M::PRIMARY_KEYS {
+            let present = order.iter().any(|o| {
+                matches!(o.target, crate::expr::OrderTarget::Column { table, name } if table == M::TABLE && name == *key)
+            });
+            if !present {
+                order.push(Column::<M>::new(key).asc());
+            }
+        }
+        order
+    }
+
+    /// ```sql
+    /// SELECT * FROM (
+    ///     SELECT [DISTINCT ON (pk)] <columns>, <sort keys> AS __rok_o{i} FROM … WHERE …
+    /// ) k WHERE (k.__rok_o0 > $ OR (k.__rok_o0 = $ AND k.__rok_o1 > $) …)
+    /// ORDER BY k.__rok_o0, … LIMIT n + 1
+    /// ```
+    fn wrapped_cursor_sql(&self, after: Option<&Cursor>, limit: u64) -> Result<(Sql, usize)> {
+        const ALIASES: [&str; 16] = [
+            "__rok_o0",
+            "__rok_o1",
+            "__rok_o2",
+            "__rok_o3",
+            "__rok_o4",
+            "__rok_o5",
+            "__rok_o6",
+            "__rok_o7",
+            "__rok_o8",
+            "__rok_o9",
+            "__rok_o10",
+            "__rok_o11",
+            "__rok_o12",
+            "__rok_o13",
+            "__rok_o14",
+            "__rok_o15",
+        ];
+        let mut keyed = self.clone();
+        keyed.order = self.keyset_orders();
+        let n = keyed.order.len();
+        if n > ALIASES.len() {
             return Err(Error::InvalidQuery(
-                "keyset pagination can only order by columns, not expressions".into(),
+                "too many sort keys for keyset pagination".into(),
             ));
         }
+        let mut sql = keyed.new_sql();
+        sql.qualify = true;
+        sql.push("SELECT * FROM (SELECT ");
+        let multiplies = keyed.multiplies();
+        if multiplies {
+            sql.push("DISTINCT ON (");
+            Self::write_primary_keys(&mut sql);
+            sql.push(") ");
+        }
+        push_columns::<M>(&mut sql);
+        keyed.write_order_aliases(&mut sql);
+        keyed.write_from_where(&mut sql);
+        if multiplies {
+            sql.push(" ORDER BY ");
+            Self::write_primary_keys(&mut sql);
+            for o in &keyed.order {
+                sql.push(", ");
+                o.write(&mut sql);
+            }
+        }
+        sql.push(r#") "__rok_k""#);
+        let key = |i: usize| crate::expr::Term::Column {
+            table: "__rok_k",
+            name: ALIASES[i],
+        };
+        if let Some(cursor) = after {
+            if cursor.values.len() != n {
+                return Err(Error::InvalidCursor(format!(
+                    "expected {n} values, got {}",
+                    cursor.values.len()
+                )));
+            }
+            let cmp = |i: usize, op: &'static str| Cond::Cmp {
+                term: key(i),
+                op,
+                value: cursor.values[i].clone(),
+            };
+            let branches = (0..n)
+                .map(|i| {
+                    let step = match keyed.order[i].direction {
+                        crate::expr::Direction::Asc => cmp(i, ">"),
+                        crate::expr::Direction::Desc => cmp(i, "<"),
+                    };
+                    Cond::And((0..i).map(|j| cmp(j, "=")).chain([step]).collect())
+                })
+                .collect();
+            sql.push(" WHERE ");
+            Cond::Or(branches).write(&mut sql);
+        }
+        sql.push(" ORDER BY ").push_list(0..n, ", ", |sql, i| {
+            key(i).write(sql);
+            keyed.order[i].write_direction(sql);
+        });
+        sql.push(&format!(" LIMIT {}", limit + 1));
+        Ok((sql, n))
+    }
+
+    async fn wrapped_cursor_paginate<'e, E: Executor<'e>>(
+        self,
+        executor: E,
+        after: Option<&Cursor>,
+        limit: u64,
+    ) -> Result<CursorPage<M>> {
+        let (sql, n) = self.wrapped_cursor_sql(after, limit)?;
+        let rows = exec::fetch_rows(executor, &sql, &[], self.use_replica()).await?;
+        let more = rows.len() as u64 > limit;
+        let kept = &rows[..rows.len().min(limit as usize)];
+        let items = kept
+            .iter()
+            .map(M::from_row)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let next = match kept.last() {
+            Some(last) if more => Some(Cursor::new(
+                (0..n)
+                    .map(|i| Value::from_row_column(last, &format!("__rok_o{i}")))
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            _ => None,
+        };
+        Ok(CursorPage { items, next })
+    }
+
+    fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
         let order = self.keyset_order();
         let mut select = self;
         select.order = order
@@ -981,9 +1153,9 @@ impl<M: Model + Clone> Memoized<M> {
             tracing::debug!(target: "rok_db::cache", table = M::TABLE, op, "cache hit");
             return Ok(hit);
         }
-        let generation = cache.generation(M::TABLE);
+        let stamp = cache.stamp(&self.select.tables());
         let value = run(executor).await?;
-        cache.put(key, M::TABLE, generation, self.ttl, value.clone());
+        cache.put(key, stamp, self.ttl, value.clone());
         Ok(value)
     }
 
@@ -1662,5 +1834,8 @@ pub fn __cursor_sql<M: Model>(
     after: Option<&Cursor>,
     limit: u64,
 ) -> Result<Sql> {
+    if select.needs_wrapped_keyset() {
+        return Ok(select.wrapped_cursor_sql(after, limit)?.0);
+    }
     Ok(select.cursor_select(after, limit)?.to_sql())
 }

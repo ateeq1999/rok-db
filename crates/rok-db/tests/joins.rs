@@ -271,3 +271,157 @@ async fn chained_joins(db: Db) {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+#[test]
+fn cursor_sql_shape() {
+    let sql = rok_db::__private::__cursor_sql(
+        Post::query()
+            .join(Post::AUTHOR)
+            .order_by(User::NAME.asc())
+            .into_select(),
+        None,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT * FROM (SELECT "posts"."id", "posts"."author_id", "posts"."category_id", "posts"."title", "posts"."views", "posts"."deleted_at", "users"."name" AS "__rok_o0", "posts"."id" AS "__rok_o1" FROM "posts" INNER JOIN "users" ON "users"."id" = "posts"."author_id" WHERE "posts"."deleted_at" IS NULL) "__rok_k" ORDER BY "__rok_k"."__rok_o0" ASC, "__rok_k"."__rok_o1" ASC LIMIT 3"#
+    );
+}
+
+#[rok_db::test]
+async fn joined_cursor_pagination(db: Db) {
+    seed(&db).await;
+    // Posts ordered by author name, then views (descending).
+    let query = || {
+        Post::query()
+            .join(Post::AUTHOR)
+            .order_by(User::NAME.asc())
+            .order_by(Post::VIEWS.desc())
+    };
+    let mut titles = Vec::new();
+    let mut after = None;
+    loop {
+        let page = query()
+            .cursor_paginate(&db, after.as_ref(), 3)
+            .await
+            .unwrap();
+        titles.extend(page.items.into_iter().map(|p| p.title));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(titles, ["a1", "a2", "b2", "b1"]);
+
+    // A multiplying join: users ranked by their top post, one page at a time.
+    let first = User::query()
+        .join(User::POSTS)
+        .order_by(Post::VIEWS.desc())
+        .cursor_paginate(&db, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].name, "bob");
+    let second = User::query()
+        .join(User::POSTS)
+        .order_by(Post::VIEWS.desc())
+        .cursor_paginate(&db, first.next.as_ref(), 1)
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].name, "ann");
+    assert!(second.next.is_none());
+
+    // Expression orders now work without joins too.
+    let page = Post::query()
+        .order_by(Projection::<Post>::raw(r#"-"posts"."views""#, Vec::<i64>::new()).asc())
+        .cursor_paginate(&db, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|p| p.views).collect::<Vec<_>>(),
+        [500, 100]
+    );
+    let rest = Post::query()
+        .order_by(Projection::<Post>::raw(r#"-"posts"."views""#, Vec::<i64>::new()).asc())
+        .cursor_paginate(&db, page.next.as_ref(), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        rest.items.iter().map(|p| p.views).collect::<Vec<_>>(),
+        [50, 5]
+    );
+}
+
+#[rok_db::test]
+async fn joined_bulk_writes(db: Db) {
+    seed(&db).await;
+    let n = Post::query()
+        .join(Post::AUTHOR)
+        .filter(User::ROLE.eq("admin"))
+        .update()
+        .set(Post::VIEWS, 0)
+        .exec(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(Post::filter(Post::VIEWS.eq(0)).count(&db).await.unwrap(), 2);
+
+    // Soft delete, then restore through a join.
+    let n = Post::query()
+        .join(Post::AUTHOR)
+        .filter(User::NAME.eq("bob"))
+        .delete(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(Post::query().count(&db).await.unwrap(), 2);
+    let n = Post::query()
+        .join(Post::AUTHOR)
+        .filter(User::NAME.eq("bob"))
+        .with_trashed()
+        .restore(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(Post::query().count(&db).await.unwrap(), 4);
+
+    // A multiplying join updates each root row once.
+    let n = User::query()
+        .join(User::POSTS)
+        .filter(Post::VIEWS.gt(0))
+        .filter(User::NAME.eq("bob"))
+        .update()
+        .set(User::ROLE, "star")
+        .exec(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[rok_db::test]
+async fn joined_memoize(db: Db) {
+    seed(&db).await;
+    let db = Db::builder()
+        .query_cache(16)
+        .build_with_pool(db.pool().clone());
+    let cache = db.cache().unwrap().clone();
+    let ttl = std::time::Duration::from_secs(60);
+    let admin_posts = || {
+        Post::query()
+            .join(Post::AUTHOR)
+            .filter(User::ROLE.eq("admin"))
+            .memoize(ttl)
+    };
+    assert_eq!(admin_posts().count(&db).await.unwrap(), 2);
+    assert_eq!(admin_posts().count(&db).await.unwrap(), 2);
+    assert_eq!(cache.stats().hits, 1);
+
+    // Writing to the *joined* table invalidates the entry.
+    User::filter(User::NAME.eq("bob"))
+        .update()
+        .set(User::ROLE, "admin")
+        .exec(&db)
+        .await
+        .unwrap();
+    assert_eq!(admin_posts().count(&db).await.unwrap(), 4);
+}
