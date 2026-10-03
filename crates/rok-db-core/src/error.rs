@@ -27,6 +27,15 @@ pub enum Error {
         key: String,
     },
 
+    /// The record failed validation (`#[rok(validate(…))]`); nothing was
+    /// written.
+    #[error("validation failed: {0}")]
+    Validation(crate::validate::ValidationErrors),
+
+    /// A lifecycle hook rejected the operation or failed.
+    #[error("{0}")]
+    Hook(#[source] sqlx::error::BoxDynError),
+
     /// A pagination cursor could not be decoded.
     #[error("invalid cursor: {0}")]
     InvalidCursor(String),
@@ -62,9 +71,30 @@ impl Error {
         )
     }
 
+    /// Wrap any error returned from a [`Hooks`](crate::Hooks) method.
+    pub fn hook(error: impl Into<sqlx::error::BoxDynError>) -> Self {
+        Error::Hook(error.into())
+    }
+
+    /// The validation errors, if this is an [`Error::Validation`].
+    pub fn validation_errors(&self) -> Option<&crate::validate::ValidationErrors> {
+        match self {
+            Error::Validation(errors) => Some(errors),
+            _ => None,
+        }
+    }
+
     /// `true` if this is an optimistic-locking [`Error::Conflict`].
     pub fn is_conflict(&self) -> bool {
         matches!(self, Error::Conflict { .. })
+    }
+
+    /// `true` for a serialization failure or deadlock (SQLSTATE `40001` /
+    /// `40P01`): the transaction can be retried as a whole.
+    pub fn is_serialization_failure(&self) -> bool {
+        self.db_error()
+            .and_then(|e| e.code())
+            .is_some_and(|code| code == "40001" || code == "40P01")
     }
 
     /// `true` if the database rejected the query because of a unique constraint.

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Custom column types: `#[derive(DbEnum)]` (TEXT or native PostgreSQL
+  enums, with `rename`/`rename_all`), `#[derive(DbNewtype)]`,
+  `impl_value!`, `Value::Custom` / `Value::custom` and the `CustomType`
+  marker trait.
+- Validation: `#[rok(validate(length, range, email, non_empty, custom))]`
+  field rules and `#[rok(validate_with = …)]`, checked before every insert,
+  upsert and save; `Error::Validation` with `ValidationErrors`.
+- Lifecycle hooks: the `Hooks` trait (`before_/after_` insert, save and
+  delete), implemented by the user with `#[rok(hooks)]`; `Error::Hook`.
+- Scopes: `#[rok(default_scope = …)]`, `Select::unscoped`,
+  `Update::unscoped` and `Select::scope` for reusable named scopes.
+- Transactions with options: `Db::transaction_with`, `TxOptions`
+  (isolation level, read-only, retries with backoff), `Isolation`, the
+  `Retryable` trait and `Error::is_serialization_failure`.
+- Testing support (feature `testing`): `#[rok_db::test]` and
+  `testing::TestDb` create a temporary database per test.
+- `Select` is now part of the prelude.
+
 - Keyset pagination: `Select::cursor_paginate` returning a `CursorPage`
   with an opaque, URL-safe `Cursor` (mixed sort directions, primary-key
   tiebreaker).

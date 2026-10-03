@@ -34,7 +34,7 @@ pub(crate) enum Trashed {
 }
 
 impl Trashed {
-    /// The implicit condition for model `M`, if any.
+    /// The implicit soft-delete condition for model `M`, if any.
     fn cond<M: Model>(self) -> Option<Cond> {
         let column = M::DELETED_AT_COLUMN?;
         match self {
@@ -43,6 +43,13 @@ impl Trashed {
             Trashed::Include => None,
         }
     }
+}
+
+/// Implicit conditions: the soft-delete scope and, unless `unscoped`, the
+/// model's default scope.
+fn implicit<M: Model>(trashed: Trashed, scoped: bool) -> Vec<Cond> {
+    let default = scoped.then(M::default_scope).flatten().map(|e| e.cond);
+    trashed.cond::<M>().into_iter().chain(default).collect()
 }
 
 /// Lock mode appended to a `SELECT`.
@@ -65,6 +72,7 @@ pub struct Select<M> {
     offset: Option<u64>,
     lock: Option<Lock>,
     trashed: Trashed,
+    scoped: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -86,6 +94,7 @@ impl<M: Model> Select<M> {
             offset: None,
             lock: None,
             trashed: Trashed::Exclude,
+            scoped: true,
             _model: PhantomData,
         }
     }
@@ -93,6 +102,26 @@ impl<M: Model> Select<M> {
     /// Add a `WHERE` condition. Multiple calls are combined with `AND`.
     pub fn filter(mut self, expr: Expr<M>) -> Self {
         self.filters.push(expr.cond);
+        self
+    }
+
+    /// Apply a reusable query fragment ("named scope"):
+    ///
+    /// ```ignore
+    /// fn active(q: Select<User>) -> Select<User> { q.filter(User::ACTIVE.eq(true)) }
+    /// fn newest(q: Select<User>) -> Select<User> { q.order_by(User::ID.desc()) }
+    ///
+    /// User::query().scope(active).scope(newest).limit(10)
+    /// ```
+    pub fn scope(self, scope: impl FnOnce(Self) -> Self) -> Self {
+        scope(self)
+    }
+
+    /// Drop the model's default scope (`#[rok(default_scope = …)]`) for this
+    /// query. Soft-delete filtering is controlled separately with
+    /// [`with_trashed`](Self::with_trashed).
+    pub fn unscoped(mut self) -> Self {
+        self.scoped = false;
         self
     }
 
@@ -202,6 +231,7 @@ impl<M: Model> Select<M> {
             filters: self.filters,
             sets: Vec::new(),
             trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -241,8 +271,8 @@ impl<M: Model> Select<M> {
 
     fn write_from_where(&self, sql: &mut Sql) {
         sql.push(" FROM ").push_ident(M::TABLE);
-        let scope = self.trashed.cond::<M>();
-        push_where(sql, " WHERE ", self.filters.iter().chain(&scope));
+        let implicit = implicit::<M>(self.trashed, self.scoped);
+        push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
     /// `SELECT 1 FROM … WHERE …`, the body of an `EXISTS` subquery.
@@ -566,6 +596,7 @@ impl<M> Clone for Select<M> {
             offset: self.offset,
             lock: self.lock,
             trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -783,6 +814,7 @@ pub struct Update<M> {
     filters: Vec<Cond>,
     sets: Vec<(&'static str, Assign)>,
     trashed: Trashed,
+    scoped: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -798,8 +830,15 @@ impl<M: Model> Update<M> {
             filters: Vec::new(),
             sets: Vec::new(),
             trashed: Trashed::Exclude,
+            scoped: true,
             _model: PhantomData,
         }
+    }
+
+    /// Ignore the model's default scope.
+    pub fn unscoped(mut self) -> Self {
+        self.scoped = false;
+        self
     }
 
     /// Add a `WHERE` condition. Multiple calls are combined with `AND`.
@@ -857,6 +896,7 @@ impl<M: Model> Update<M> {
         Select {
             filters: self.filters,
             trashed: self.trashed,
+            scoped: self.scoped,
             ..Select::new()
         }
     }
@@ -895,8 +935,8 @@ impl<M: Model> Update<M> {
                     .push(" + 1");
             }
         }
-        let scope = self.trashed.cond::<M>();
-        push_where(sql, " WHERE ", self.filters.iter().chain(&scope));
+        let implicit = implicit::<M>(self.trashed, self.scoped);
+        push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
     fn check(&self) -> Result<()> {
@@ -936,6 +976,7 @@ impl<M> Clone for Update<M> {
             filters: self.filters.clone(),
             sets: self.sets.clone(),
             trashed: self.trashed,
+            scoped: self.scoped,
             _model: PhantomData,
         }
     }
@@ -1272,11 +1313,21 @@ impl<'a, M: Model> InsertMany<'a, M> {
 
     /// Run the insert and return the stored rows. Rows skipped by
     /// `ON CONFLICT … DO NOTHING` are not returned.
+    ///
+    /// Every record is validated and passed to `before_insert` first; each
+    /// returned row is passed to `after_insert`.
     pub async fn exec<'e, E: Executor<'e>>(self, executor: E) -> Result<Vec<M>> {
         if self.records.is_empty() {
             return Ok(Vec::new());
         }
-        exec::fetch_all(executor, &self.build()?, &[M::TABLE]).await
+        for record in self.records {
+            crate::model::pre_insert(record)?;
+        }
+        let rows: Vec<M> = exec::fetch_all(executor, &self.build()?, &[M::TABLE]).await?;
+        for row in &rows {
+            row.after_insert()?;
+        }
+        Ok(rows)
     }
 }
 

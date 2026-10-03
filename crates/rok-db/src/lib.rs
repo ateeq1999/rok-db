@@ -81,6 +81,13 @@
 //!   [`Insert::on_conflict`] with `do_nothing`/`do_update`/`do_update_all`.
 //! - **Subqueries**: [`Column::in_subquery`], [`Expr::exists`] and
 //!   [`Column::eq_outer`] for correlation.
+//! - **Custom column types**: [`derive@DbEnum`], [`derive@DbNewtype`] and
+//!   [`impl_value!`].
+//! - **Validation & hooks**: `#[rok(validate(…))]` rules ([`validate`]) and
+//!   the [`Hooks`] trait.
+//! - **Scopes**: `#[rok(default_scope = …)]`, [`Select::scope`],
+//!   [`Select::unscoped`].
+//! - **Retrying transactions**: [`Db::transaction_with`] with [`TxOptions`].
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`
@@ -108,6 +115,7 @@
 //! | `uuid`    | `uuid::Uuid` columns                                 |
 //! | `json`    | `serde_json::Value` and `sqlx::types::Json<T>` columns |
 //! | `migrate` | [`Db::migrate`] for running sqlx migrations          |
+//! | `testing` | [`macro@test`] and [`testing::TestDb`]: a temporary database per test |
 //! | `full`    | all of the above                                     |
 
 pub use rok_db_core::*;
@@ -118,9 +126,22 @@ pub use rok_db_macros::Model;
 /// Derive `sqlx::FromRow` for a plain struct, without depending on sqlx.
 pub use rok_db_macros::FromRow;
 
+/// Derive a column type for a field-less enum (stored as `TEXT` or a
+/// PostgreSQL enum).
+pub use rok_db_macros::DbEnum;
+
+/// Derive a column type for a single-field tuple struct.
+pub use rok_db_macros::DbNewtype;
+
+/// Run an async test against a fresh, temporary database (feature `testing`).
+#[cfg(feature = "testing")]
+pub use rok_db_macros::test;
+
 /// Everything you need for day-to-day use: `use rok_db::prelude::*;`
 pub mod prelude {
-    pub use crate::{Column, Db, Executor, Expr, Model, Page, Projection, Tx};
+    pub use crate::{
+        Column, Db, DbEnum, DbNewtype, Executor, Expr, Model, Page, Projection, Select, Tx,
+    };
     pub use futures_util_reexports::*;
 
     mod futures_util_reexports {

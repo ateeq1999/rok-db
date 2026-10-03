@@ -8,7 +8,61 @@ use sqlx::Row;
 use crate::exec;
 use crate::query::{Conflict, ConflictAction, ConflictTarget, Insert, InsertMany, Select, Update};
 use crate::sql::Sql;
+use crate::validate::ValidationErrors;
 use crate::{Column, Error, Executor, Expr, Order, Result, Value};
+
+/// Lifecycle hooks, called around the record-level writes of [`Model`]
+/// (`insert`, `insert_all`/`insert_many`, `upsert`, `save`, `delete`,
+/// `force_delete`). Bulk query operations (`Select::update`,
+/// `Select::delete`, …) don't call hooks.
+///
+/// `#[derive(Model)]` implements this trait with no-op hooks; add
+/// `#[rok(hooks)]` to implement it yourself:
+///
+/// ```ignore
+/// #[derive(Model)]
+/// #[rok(hooks)]
+/// struct User { id: i64, email: String }
+///
+/// impl Hooks for User {
+///     fn before_insert(&self) -> rok_db::Result<()> {
+///         if self.email.ends_with("@blocked.example") {
+///             return Err(rok_db::Error::hook("this domain is blocked"));
+///         }
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// A `before_*` error aborts the operation before anything is written.
+/// An `after_*` error is returned to the caller *after* the write happened;
+/// run the operation in a transaction if it should be rolled back.
+pub trait Hooks {
+    /// Before inserting (also upserts), after validation.
+    fn before_insert(&self) -> Result<()> {
+        Ok(())
+    }
+    /// After inserting, with the stored row.
+    fn after_insert(&self) -> Result<()> {
+        Ok(())
+    }
+    /// Before `save`, after validation.
+    fn before_save(&self) -> Result<()> {
+        Ok(())
+    }
+    /// After `save`, with the stored row.
+    fn after_save(&self) -> Result<()> {
+        Ok(())
+    }
+    /// Before `delete` / `force_delete`.
+    fn before_delete(&self) -> Result<()> {
+        Ok(())
+    }
+    /// After `delete` / `force_delete`.
+    fn after_delete(&self) -> Result<()> {
+        Ok(())
+    }
+}
 
 /// A database-backed record.
 ///
@@ -26,7 +80,9 @@ use crate::{Column, Error, Executor, Expr, Order, Result, Value};
 ///     .all(&db)
 ///     .await?;
 /// ```
-pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'static {
+pub trait Model:
+    for<'r> FromRow<'r, PgRow> + Hooks + Send + Sync + Unpin + Sized + 'static
+{
     /// Table name, optionally schema-qualified (`"auth.users"`).
     const TABLE: &'static str;
     /// Primary key column.
@@ -52,6 +108,19 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
 
     /// Every column with its current value, in [`COLUMNS`](Model::COLUMNS) order.
     fn values(&self) -> Vec<(&'static str, Value)>;
+
+    /// Check the record's `#[rok(validate(…))]` rules. Called automatically
+    /// before every insert and save.
+    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+        Ok(())
+    }
+
+    /// A condition applied to every query of this model (like soft deletes),
+    /// set with `#[rok(default_scope = path::to::fn)]`. Remove it per query
+    /// with [`Select::unscoped`].
+    fn default_scope() -> Option<Expr<Self>> {
+        None
+    }
 
     /// The current value of a single column, or `None` if `column` isn't one
     /// of [`COLUMNS`](Model::COLUMNS). The derive generates an efficient
@@ -178,7 +247,9 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
         // Reloading a soft-deleted record still works.
         let key = self.primary_key();
         let missing = key.to_string();
-        let select = Self::filter(Self::primary_key_column().eq(key)).with_trashed();
+        let select = Self::filter(Self::primary_key_column().eq(key))
+            .with_trashed()
+            .unscoped();
         async move {
             select
                 .first(executor)
@@ -201,11 +272,15 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     where
         E: Executor<'e>,
     {
+        let pre = pre_insert(self);
         let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
         async move {
-            exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            pre?;
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
                 .await?
-                .ok_or_else(|| Error::not_found::<Self>(None))
+                .ok_or_else(|| Error::not_found::<Self>(None))?;
+            row.after_insert()?;
+            Ok(row)
         }
     }
 
@@ -231,11 +306,15 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
             target: ConflictTarget::Columns(vec![Self::PRIMARY_KEY]),
             action: ConflictAction::UpdateAll,
         };
+        let pre = pre_insert(self);
         let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
         async move {
-            exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            pre?;
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
                 .await?
-                .ok_or_else(|| Error::not_found::<Self>(None))
+                .ok_or_else(|| Error::not_found::<Self>(None))?;
+            row.after_insert()?;
+            Ok(row)
         }
     }
 
@@ -261,11 +340,15 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
             target: ConflictTarget::Columns(columns.into_iter().map(|c| c.name()).collect()),
             action: ConflictAction::UpdateAll,
         };
+        let pre = pre_insert(self);
         let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
         async move {
-            exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
+            pre?;
+            let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE])
                 .await?
-                .ok_or_else(|| Error::not_found::<Self>(None))
+                .ok_or_else(|| Error::not_found::<Self>(None))?;
+            row.after_insert()?;
+            Ok(row)
         }
     }
 
@@ -277,6 +360,10 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     where
         E: Executor<'e>,
     {
+        let pre = self
+            .validate()
+            .map_err(Error::Validation)
+            .and_then(|()| self.before_save());
         let pk = self.primary_key();
         let key = pk.to_string();
         let managed = |c: &str| {
@@ -287,6 +374,7 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
             .collect();
         let mut update = Self::update_all()
             .with_trashed()
+            .unscoped()
             .filter(Self::primary_key_column().eq(pk.clone()));
         let version = Self::VERSION_COLUMN.and_then(|c| self.value_of(c).map(|v| (c, v)));
         if let Some((column, current)) = version.clone() {
@@ -299,23 +387,28 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
             || Self::UPDATED_AT_COLUMN.is_some()
             || Self::VERSION_COLUMN.is_some();
         async move {
-            if !changes {
-                return update
+            pre?;
+            let row = if !changes {
+                update
                     .into_select()
                     .first(executor)
                     .await?
-                    .ok_or_else(|| Error::not_found::<Self>(Some(key)));
-            }
-            if version.is_some() {
+                    .ok_or_else(|| Error::not_found::<Self>(Some(key)))?
+            } else if version.is_some() {
                 let mut sql = Sql::new();
                 update.write_into(&mut sql);
-                let exists = Self::filter(Self::primary_key_column().eq(pk.clone())).with_trashed();
-                return checked_write::<Self, _>(executor, sql, pk, exists).await;
-            }
-            update
-                .returning_one(executor)
-                .await?
-                .ok_or_else(|| Error::not_found::<Self>(Some(key)))
+                let exists = Self::filter(Self::primary_key_column().eq(pk.clone()))
+                    .with_trashed()
+                    .unscoped();
+                checked_write::<Self, _>(executor, sql, pk, exists).await?
+            } else {
+                update
+                    .returning_one(executor)
+                    .await?
+                    .ok_or_else(|| Error::not_found::<Self>(Some(key)))?
+            };
+            row.after_save()?;
+            Ok(row)
         }
     }
 
@@ -350,11 +443,12 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     where
         E: Executor<'e>,
     {
+        let pre = self.before_delete();
         let pk = self.primary_key();
         let key = pk.to_string();
         let soft = Self::DELETED_AT_COLUMN.filter(|_| !force);
         let version = Self::VERSION_COLUMN.and_then(|c| self.value_of(c).map(|v| (c, v)));
-        let mut select = Self::filter(Self::primary_key_column().eq(pk.clone()));
+        let mut select = Self::filter(Self::primary_key_column().eq(pk.clone())).unscoped();
         if force {
             select = select.with_trashed();
         }
@@ -379,15 +473,13 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
             }
         }
         async move {
+            pre?;
             if version.is_some() {
-                return checked_write::<Self, _>(executor, sql, pk, exists)
-                    .await
-                    .map(|_| ());
+                checked_write::<Self, _>(executor, sql, pk, exists).await?;
+            } else if exec::execute(executor, &sql, &[Self::TABLE]).await? == 0 {
+                return Err(Error::not_found::<Self>(Some(key)));
             }
-            match exec::execute(executor, &sql, &[Self::TABLE]).await? {
-                0 => Err(Error::not_found::<Self>(Some(key))),
-                _ => Ok(()),
-            }
+            self.after_delete()
         }
     }
 
@@ -402,6 +494,7 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
         let update = Self::DELETED_AT_COLUMN.map(|deleted_at| {
             Self::filter(Self::primary_key_column().eq(pk))
                 .only_trashed()
+                .unscoped()
                 .update()
                 .set_raw(Column::new(deleted_at), "NULL", [] as [Value; 0])
         });
@@ -461,6 +554,12 @@ async fn checked_write<'e, M: Model, E: Executor<'e>>(
     } else {
         Err(Error::not_found::<M>(Some(key)))
     }
+}
+
+/// Validation and `before_insert`, run before any insert of `record`.
+pub(crate) fn pre_insert<M: Model>(record: &M) -> Result<()> {
+    record.validate().map_err(Error::Validation)?;
+    record.before_insert()
 }
 
 fn writable<M: Model>(

@@ -124,6 +124,9 @@ fn encode(value: &Value) -> String {
         Value::NaiveTime(v) => part('T', v, |v| s(v)),
         #[cfg(feature = "json")]
         Value::Json(v) => part('j', v, |v| s(v)),
+        // Custom types can't be decoded generically; `x` makes the cursor
+        // fail to parse with a clear error instead of misbehaving.
+        Value::Custom(v) => format!("x{}", hex(format!("{v:?}").as_bytes())),
     }
 }
 
@@ -172,6 +175,11 @@ fn decode(part: &str) -> Result<Value, Error> {
         #[cfg(feature = "json")]
         'j' => val!(Json, |b| serde_json::from_slice(&b)
             .map_err(|_| Error::InvalidCursor("malformed json".into()))?),
+        'x' => {
+            return Err(Error::InvalidCursor(
+                "custom column types can't be used as keyset pagination columns".into(),
+            ));
+        }
         other => return Err(Error::InvalidCursor(format!("unknown type tag `{other}`"))),
     })
 }
