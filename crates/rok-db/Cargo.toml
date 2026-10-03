@@ -1,0 +1,28 @@
+[package]
+name = "rok-db"
+description = "An ergonomic, type-safe async ORM for PostgreSQL built on sqlx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+keywords = ["orm", "database", "postgres", "sqlx", "async"]
+categories = ["database"]
+
+[features]
+default = []
+chrono = ["rok-db-core/chrono"]
+uuid = ["rok-db-core/uuid"]
+json = ["rok-db-core/json"]
+migrate = ["rok-db-core/migrate"]
+full = ["chrono", "uuid", "json", "migrate"]
+
+[dependencies]
+rok-db-core = { workspace = true }
+rok-db-macros = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+

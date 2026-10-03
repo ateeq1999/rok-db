@@ -1,9 +1,0 @@
-[package]
-name = "orm"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-orm-core = { path = "../orm-core" }
-orm-macros = { path = "../orm-macros" }

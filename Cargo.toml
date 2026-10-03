@@ -1,12 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/orm-core",
-    "crates/orm-macros",
-    "crates/orm",
+    "crates/rok-db-core",
+    "crates/rok-db-macros",
+    "crates/rok-db",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ateeq1999/rok-db"
+rust-version = "1.85"
+
+[workspace.dependencies]
+rok-db-core = { path = "crates/rok-db-core", version = "0.1.0" }
+rok-db-macros = { path = "crates/rok-db-macros", version = "0.1.0" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "macros",
+] }

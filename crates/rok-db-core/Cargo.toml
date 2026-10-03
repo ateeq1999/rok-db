@@ -1,0 +1,22 @@
+[package]
+name = "rok-db-core"
+description = "Core runtime for rok-db: models, query builder, values and connection handling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+chrono = ["sqlx/chrono"]
+uuid = ["sqlx/uuid"]
+json = ["sqlx/json", "dep:serde", "dep:serde_json"]
+migrate = ["sqlx/migrate"]
+
+[dependencies]
+sqlx = { workspace = true }
+futures-core = "0.3"
+thiserror = "2"
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
