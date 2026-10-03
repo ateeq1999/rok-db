@@ -757,6 +757,8 @@ cargo run -p rok-db --example blog             # needs DATABASE_URL
 
 Database tests use per-connection `TEMP` tables, so they never touch existing data.
 
+Coding agents: start with [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
+
 ## License
 
 Licensed under either of

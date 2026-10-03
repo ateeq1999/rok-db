@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `AGENTS.md`, `llms.txt` and `.agents/skills/` (check, commit, pr, rfc, model, query,
+  quality, release) for coding agents; `CLAUDE.md` and `.claude` point to them.
+
 - Typed joins (RFC 0001, accepted): `Select::join` / `left_join` through
   `BelongsTo`, `HasMany`, `HasOne` or ad-hoc `Column::on` conditions,
   returning `Joined<M, J>`, whose `filter`, `order_by`, `group_by`,
@@ -153,6 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The MSRV CI job checks with the `rust-version` toolchain again: a Dependabot update had
+  turned `dtolnay/rust-toolchain@1.85` into `@1.120`. Dependabot now ignores that action.
 - The `#[rok_db::test]` macro builds with syn 3.
 - `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
   awaited, not when the future is created, so scopes such as

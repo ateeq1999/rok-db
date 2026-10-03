@@ -12,6 +12,7 @@ merged and released. Everyone taking part agrees to follow the
 - [Coding standards](#coding-standards)
 - [Compatibility policy](#compatibility-policy)
 - [Release process](#release-process)
+- [Coding agents](#coding-agents)
 
 ## Ways to contribute
 
@@ -56,6 +57,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo +1.85 check --workspace --all-targets --all-features   # MSRV
+cargo deny check                                             # licenses and advisories
 ```
 
 ### Repository layout
@@ -156,6 +159,13 @@ Maintainers cut releases from `main`:
 5. Publish in dependency order:
    `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db`.
 6. Create a GitHub release from the tag using the changelog entry.
+
+## Coding agents
+
+`AGENTS.md` (also loaded as `CLAUDE.md`) points coding agents at `llms.txt`, a digest of the
+API and conventions, and at task checklists in `.agents/skills/` (`.claude` links to it):
+checks, commits, pull requests, RFCs, the derive, query building, code-quality review and
+releases. Keep them current when you change a convention.
 
 ## License
 
