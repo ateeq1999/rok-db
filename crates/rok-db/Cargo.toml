@@ -28,6 +28,8 @@ rok-db-macros = { workspace = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [package.metadata.docs.rs]
 all-features = true

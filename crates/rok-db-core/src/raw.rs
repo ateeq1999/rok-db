@@ -1,6 +1,9 @@
 use sqlx::postgres::PgRow;
 use sqlx::{Decode, FromRow, Postgres, Type};
 
+use futures_core::stream::BoxStream;
+
+use crate::exec;
 use crate::sql::Sql;
 use crate::{Executor, Result, Value};
 
@@ -22,6 +25,7 @@ pub fn raw(sql: impl Into<String>) -> Raw {
     Raw {
         sql: sql.into(),
         params: Vec::new(),
+        writes: Vec::new(),
     }
 }
 
@@ -30,12 +34,21 @@ pub fn raw(sql: impl Into<String>) -> Raw {
 pub struct Raw {
     sql: String,
     params: Vec<Value>,
+    writes: Vec<&'static str>,
 }
 
 impl Raw {
     /// Bind the next parameter.
     pub fn bind(mut self, value: impl Into<Value>) -> Self {
         self.params.push(value.into());
+        self
+    }
+
+    /// Declare that this statement modifies `table`, so cached results of
+    /// that table are invalidated when it succeeds (see
+    /// [`QueryCache`](crate::QueryCache)).
+    pub fn invalidates(mut self, table: &'static str) -> Self {
+        self.writes.push(table);
         self
     }
 
@@ -52,11 +65,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        let sql = self.to_sql();
-        let args = sql.arguments()?;
-        Ok(sqlx::query_as_with(sql.as_str(), args)
-            .fetch_all(executor)
-            .await?)
+        exec::fetch_all(executor, &self.to_sql(), &self.writes).await
     }
 
     /// Fetch at most one row.
@@ -65,11 +74,7 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        let sql = self.to_sql();
-        let args = sql.arguments()?;
-        Ok(sqlx::query_as_with(sql.as_str(), args)
-            .fetch_optional(executor)
-            .await?)
+        exec::fetch_optional(executor, &self.to_sql(), &self.writes).await
     }
 
     /// Fetch exactly one row.
@@ -78,11 +83,9 @@ impl Raw {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
         E: Executor<'e>,
     {
-        let sql = self.to_sql();
-        let args = sql.arguments()?;
-        Ok(sqlx::query_as_with(sql.as_str(), args)
-            .fetch_one(executor)
-            .await?)
+        exec::fetch_optional(executor, &self.to_sql(), &self.writes)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound.into())
     }
 
     /// Fetch the first column of the first row, e.g. `SELECT COUNT(*) …`.
@@ -91,21 +94,21 @@ impl Raw {
         T: Type<Postgres> + for<'r> Decode<'r, Postgres> + Send + Unpin,
         E: Executor<'e>,
     {
-        let sql = self.to_sql();
-        let args = sql.arguments()?;
-        Ok(sqlx::query_scalar_with(sql.as_str(), args)
-            .fetch_one(executor)
-            .await?)
+        exec::fetch_scalar(executor, &self.to_sql()).await
+    }
+
+    /// Stream rows one at a time.
+    pub fn stream<'e, T, E>(self, executor: E) -> BoxStream<'e, Result<T>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin + 'e,
+        E: Executor<'e> + 'e,
+    {
+        exec::stream(executor, self.to_sql())
     }
 
     /// Execute the statement and return the number of affected rows.
     pub async fn execute<'e, E: Executor<'e>>(self, executor: E) -> Result<u64> {
-        let sql = self.to_sql();
-        let args = sql.arguments()?;
-        Ok(sqlx::query_with(sql.as_str(), args)
-            .execute(executor)
-            .await?
-            .rows_affected())
+        exec::execute(executor, &self.to_sql(), &self.writes).await
     }
 }
 

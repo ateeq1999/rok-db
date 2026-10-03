@@ -3,7 +3,8 @@ use std::future::Future;
 use sqlx::FromRow;
 use sqlx::postgres::PgRow;
 
-use crate::query::{Insert, Select, Update, fetch_all, fetch_optional};
+use crate::exec;
+use crate::query::{Insert, Select, Update};
 use crate::sql::Sql;
 use crate::{Column, Error, Executor, Expr, Order, Result, Value};
 
@@ -33,12 +34,26 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     /// Columns filled in by the database (serial ids, defaults, triggers).
     /// They are read but never written by [`insert`](Model::insert) or [`save`](Model::save).
     const GENERATED: &'static [&'static str] = &[];
+    /// Column set to `now()` on insert and never changed afterwards.
+    const CREATED_AT_COLUMN: Option<&'static str> = None;
+    /// Column set to `now()` on insert and on every update.
+    const UPDATED_AT_COLUMN: Option<&'static str> = None;
 
     /// The value of this record's primary key.
     fn primary_key(&self) -> Value;
 
     /// Every column with its current value, in [`COLUMNS`](Model::COLUMNS) order.
     fn values(&self) -> Vec<(&'static str, Value)>;
+
+    /// The current value of a single column, or `None` if `column` isn't one
+    /// of [`COLUMNS`](Model::COLUMNS). The derive generates an efficient
+    /// implementation.
+    fn value_of(&self, column: &str) -> Option<Value> {
+        self.values()
+            .into_iter()
+            .find(|(c, _)| *c == column)
+            .map(|(_, v)| v)
+    }
 
     // ----- query entry points ---------------------------------------------
 
@@ -151,7 +166,7 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     {
         let sql = insert_sql::<Self>(std::slice::from_ref(self), false);
         async move {
-            fetch_optional::<Self, _>(executor, sql)
+            exec::fetch_optional::<Self, _>(executor, &sql, &[Self::TABLE])
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))
         }
@@ -168,7 +183,7 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
         let sql = (!records.is_empty()).then(|| insert_sql::<Self>(records, false));
         async move {
             match sql {
-                Some(sql) => fetch_all(executor, sql).await,
+                Some(sql) => exec::fetch_all(executor, &sql, &[Self::TABLE]).await,
                 None => Ok(Vec::new()),
             }
         }
@@ -183,7 +198,7 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
     {
         let sql = insert_sql::<Self>(std::slice::from_ref(self), true);
         async move {
-            fetch_optional::<Self, _>(executor, sql)
+            exec::fetch_optional::<Self, _>(executor, &sql, &[Self::TABLE])
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))
         }
@@ -198,14 +213,14 @@ pub trait Model: for<'r> FromRow<'r, PgRow> + Send + Sync + Unpin + Sized + 'sta
         let pk = self.primary_key();
         let key = pk.to_string();
         let sets: Vec<_> = writable::<Self>(self.values())
-            .filter(|(c, _)| *c != Self::PRIMARY_KEY)
+            .filter(|(c, _)| *c != Self::PRIMARY_KEY && !is_timestamp::<Self>(c))
             .collect();
         let mut update = Self::update_all().filter(Self::primary_key_column().eq(pk));
         for (column, value) in sets {
             update = update.set(Column::new(column), value);
         }
         async move {
-            let row = if update.has_sets() {
+            let row = if update.has_sets() || Self::UPDATED_AT_COLUMN.is_some() {
                 update.returning_one(executor).await?
             } else {
                 update.into_select().first(executor).await?
@@ -240,6 +255,10 @@ fn writable<M: Model>(
         .filter(|(c, _)| !M::GENERATED.contains(c))
 }
 
+fn is_timestamp<M: Model>(column: &str) -> bool {
+    M::CREATED_AT_COLUMN == Some(column) || M::UPDATED_AT_COLUMN == Some(column)
+}
+
 /// Build `INSERT … VALUES (…), (…) [ON CONFLICT …] RETURNING …`.
 fn insert_sql<M: Model>(records: &[M], upsert: bool) -> Sql {
     let include = |c: &str| !M::GENERATED.contains(&c) || (upsert && c == M::PRIMARY_KEY);
@@ -259,8 +278,12 @@ fn insert_sql<M: Model>(records: &[M], upsert: bool) -> Sql {
         sql.push_list(records, ", ", |sql, record| {
             let values = record.values().into_iter().filter(|(c, _)| include(c));
             sql.push("(")
-                .push_list(values, ", ", |sql, (_, v)| {
-                    sql.bind(v);
+                .push_list(values, ", ", |sql, (c, v)| {
+                    if is_timestamp::<M>(c) {
+                        sql.push("now()");
+                    } else {
+                        sql.bind(v);
+                    }
                 })
                 .push(")");
         });
@@ -269,7 +292,10 @@ fn insert_sql<M: Model>(records: &[M], upsert: bool) -> Sql {
         sql.push(" ON CONFLICT (")
             .push_ident(M::PRIMARY_KEY)
             .push(")");
-        let updates: Vec<_> = columns.iter().filter(|c| **c != M::PRIMARY_KEY).collect();
+        let updates: Vec<_> = columns
+            .iter()
+            .filter(|c| **c != M::PRIMARY_KEY && M::CREATED_AT_COLUMN != Some(**c))
+            .collect();
         if updates.is_empty() {
             // Still return the existing row.
             sql.push(" DO UPDATE SET ")

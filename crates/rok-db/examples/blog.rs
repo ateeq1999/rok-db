@@ -4,9 +4,12 @@
 //! DATABASE_URL=postgres://postgres:postgres@localhost/app cargo run -p rok-db --example blog
 //! ```
 
+use std::time::Duration;
+
 use rok_db::prelude::*;
 
 #[derive(Debug, Clone, Model)]
+#[rok(has_many(posts = Post::AUTHOR_ID))]
 struct Author {
     #[rok(primary_key, generated)]
     id: i64,
@@ -18,6 +21,7 @@ struct Author {
 struct Post {
     #[rok(generated)]
     id: i64,
+    #[rok(belongs_to = Author)]
     author_id: i64,
     title: String,
     published: bool,
@@ -27,7 +31,11 @@ struct Post {
 
 #[tokio::main]
 async fn main() -> rok_db::Result<()> {
-    let db = Db::builder().max_connections(5).connect_env().await?;
+    let db = Db::builder()
+        .max_connections(5)
+        .query_cache(1_000)
+        .connect_env()
+        .await?;
 
     db.execute(
         "DROP TABLE IF EXISTS posts, authors;
@@ -99,6 +107,33 @@ async fn main() -> rok_db::Result<()> {
             .scalar(&db)
             .await?;
     println!("total views: {total_views}");
+
+    // Relations: lazy query and eager loading without N+1.
+    let first = author.posts().order_by(Post::ID).first(&db).await?;
+    let authors = Author::all(&db).await?;
+    let posts = Author::POSTS.load(&db, &authors).await?;
+    for a in &authors {
+        println!(
+            "{} wrote {} posts (first: {:?})",
+            a.name,
+            posts.get(a).len(),
+            first.as_ref().map(|p| &p.title)
+        );
+    }
+
+    // Stream rows instead of loading them all at once.
+    let mut stream = Post::order_by(Post::ID).stream(&db);
+    let mut streamed = 0;
+    while let Some(_post) = stream.try_next().await? {
+        streamed += 1;
+    }
+    println!("streamed {streamed} posts");
+
+    // Memoized count: the second call is served from the cache.
+    let published = || Post::filter(Post::PUBLISHED.eq(true)).memoize(Duration::from_secs(30));
+    published().count(&db).await?;
+    published().count(&db).await?;
+    println!("cache: {:?}", db.cache().map(|c| c.stats()));
 
     author.delete(&db).await?;
     println!("remaining posts after cascade: {}", Post::count(&db).await?);

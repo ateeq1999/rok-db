@@ -32,7 +32,7 @@ impl<M> Column<M> {
 
     fn cmp(self, op: &'static str, value: impl Into<Value>) -> Expr<M> {
         Expr::new(Cond::Cmp {
-            column: self.name,
+            term: Term::Column(self.name),
             op,
             value: value.into(),
         })
@@ -139,6 +139,39 @@ impl<M> Column<M> {
             column: self.name,
             negated: true,
         })
+    }
+
+    /// `COUNT(column)` — number of non-`NULL` values.
+    pub fn count(self) -> Projection<M> {
+        Projection::func("COUNT", Some(self.name), false)
+    }
+
+    /// `COUNT(DISTINCT column)`
+    pub fn count_distinct(self) -> Projection<M> {
+        Projection::func("COUNT", Some(self.name), true)
+    }
+
+    /// `SUM(column)`. PostgreSQL returns `BIGINT` for `SMALLINT`/`INTEGER`
+    /// columns and `NUMERIC` for `BIGINT` columns; use
+    /// [`Projection::cast`] to pick the Rust type you decode into.
+    pub fn sum(self) -> Projection<M> {
+        Projection::func("SUM", Some(self.name), false)
+    }
+
+    /// `AVG(column)`, returned as `NUMERIC` for integer columns; see
+    /// [`Projection::cast`].
+    pub fn avg(self) -> Projection<M> {
+        Projection::func("AVG", Some(self.name), false)
+    }
+
+    /// `MIN(column)`
+    pub fn min(self) -> Projection<M> {
+        Projection::func("MIN", Some(self.name), false)
+    }
+
+    /// `MAX(column)`
+    pub fn max(self) -> Projection<M> {
+        Projection::func("MAX", Some(self.name), false)
     }
 
     /// Ascending ordering on this column.
@@ -278,10 +311,56 @@ impl<M> fmt::Debug for Expr<M> {
     }
 }
 
+/// Something that renders to a SQL value expression.
+#[derive(Debug, Clone)]
+pub(crate) enum Term {
+    Column(&'static str),
+    Func {
+        func: &'static str,
+        arg: Option<&'static str>,
+        distinct: bool,
+    },
+    Cast(Box<Term>, &'static str),
+    Raw(String, Vec<Value>),
+}
+
+impl Term {
+    pub(crate) fn write(&self, sql: &mut Sql) {
+        match self {
+            Term::Column(name) => {
+                sql.push_ident(name);
+            }
+            Term::Func {
+                func,
+                arg,
+                distinct,
+            } => {
+                sql.push(func).push("(");
+                if *distinct {
+                    sql.push("DISTINCT ");
+                }
+                match arg {
+                    Some(arg) => sql.push_ident(arg),
+                    None => sql.push("*"),
+                };
+                sql.push(")");
+            }
+            Term::Cast(inner, ty) => {
+                sql.push("CAST(");
+                inner.write(sql);
+                sql.push(" AS ").push(ty).push(")");
+            }
+            Term::Raw(raw, params) => {
+                sql.push("(").push_raw(raw, params).push(")");
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Cond {
     Cmp {
-        column: &'static str,
+        term: Term,
         op: &'static str,
         value: Value,
     },
@@ -311,8 +390,9 @@ pub(crate) enum Cond {
 impl Cond {
     pub(crate) fn write(&self, sql: &mut Sql) {
         match self {
-            Cond::Cmp { column, op, value } => {
-                sql.push_ident(column).push(" ").push(op).push(" ");
+            Cond::Cmp { term, op, value } => {
+                term.write(sql);
+                sql.push(" ").push(op).push(" ");
                 sql.bind(value.clone());
             }
             Cond::In {
@@ -365,6 +445,205 @@ impl Cond {
             }
         }
     }
+}
+
+/// A value expression of model `M` that can be selected: a column, an
+/// aggregate (`User::AGE.avg()`), a cast or raw SQL.
+///
+/// Use projections with [`Select::select`](crate::Select::select) to fetch
+/// tuples or custom row types instead of whole models, and compare them to
+/// build `HAVING` conditions:
+///
+/// ```ignore
+/// let per_role: Vec<(String, i64)> = User::query()
+///     .group_by(User::ROLE)
+///     .having(Projection::count_all().gt(10))
+///     .select((User::ROLE, Projection::count_all()))
+///     .fetch_all(&db)
+///     .await?;
+/// ```
+pub struct Projection<M> {
+    pub(crate) term: Term,
+    pub(crate) alias: Option<&'static str>,
+    _model: PhantomData<fn() -> M>,
+}
+
+impl<M> Projection<M> {
+    fn new(term: Term) -> Self {
+        Self {
+            term,
+            alias: None,
+            _model: PhantomData,
+        }
+    }
+
+    fn func(func: &'static str, arg: Option<&'static str>, distinct: bool) -> Self {
+        Self::new(Term::Func {
+            func,
+            arg,
+            distinct,
+        })
+    }
+
+    /// `COUNT(*)`
+    pub fn count_all() -> Self {
+        Self::func("COUNT", None, false)
+    }
+
+    /// Raw SQL where each `?` is bound to the next parameter.
+    pub fn raw<V: Into<Value>>(
+        sql: impl Into<String>,
+        params: impl IntoIterator<Item = V>,
+    ) -> Self {
+        Self::new(Term::Raw(
+            sql.into(),
+            params.into_iter().map(Into::into).collect(),
+        ))
+    }
+
+    /// `CAST(expr AS sql_type)`, e.g. `.cast("BIGINT")` or
+    /// `.cast("DOUBLE PRECISION")` to decode a `NUMERIC` aggregate into
+    /// `i64`/`f64`.
+    pub fn cast(self, sql_type: &'static str) -> Self {
+        Self {
+            term: Term::Cast(Box::new(self.term), sql_type),
+            ..self
+        }
+    }
+
+    /// Name the selected value (`expr AS alias`), for decoding into a struct
+    /// that derives `sqlx::FromRow`.
+    pub fn alias(mut self, alias: &'static str) -> Self {
+        self.alias = Some(alias);
+        self
+    }
+
+    fn cmp(self, op: &'static str, value: impl Into<Value>) -> Expr<M> {
+        Expr::new(Cond::Cmp {
+            term: self.term,
+            op,
+            value: value.into(),
+        })
+    }
+
+    /// `expr = value`
+    pub fn eq(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp("=", value)
+    }
+
+    /// `expr <> value`
+    pub fn ne(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp("<>", value)
+    }
+
+    /// `expr > value`
+    pub fn gt(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp(">", value)
+    }
+
+    /// `expr >= value`
+    pub fn gte(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp(">=", value)
+    }
+
+    /// `expr < value`
+    pub fn lt(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp("<", value)
+    }
+
+    /// `expr <= value`
+    pub fn lte(self, value: impl Into<Value>) -> Expr<M> {
+        self.cmp("<=", value)
+    }
+
+    pub(crate) fn write(&self, sql: &mut Sql) {
+        self.term.write(sql);
+        if let Some(alias) = self.alias {
+            sql.push(" AS ").push_ident(alias);
+        }
+    }
+}
+
+impl<M> From<Column<M>> for Projection<M> {
+    fn from(column: Column<M>) -> Self {
+        Self::new(Term::Column(column.name()))
+    }
+}
+
+impl<M> Clone for Projection<M> {
+    fn clone(&self) -> Self {
+        Self {
+            term: self.term.clone(),
+            alias: self.alias,
+            _model: PhantomData,
+        }
+    }
+}
+
+impl<M> fmt::Debug for Projection<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sql = Sql::new();
+        self.write(&mut sql);
+        f.debug_tuple("Projection").field(&sql.as_str()).finish()
+    }
+}
+
+/// A list of [`Projection`]s: a single column or projection, a tuple of up
+/// to 12 of them, an array or a `Vec`.
+pub trait IntoProjections<M> {
+    /// Convert into the list of selected expressions.
+    fn into_projections(self) -> Vec<Projection<M>>;
+}
+
+impl<M> IntoProjections<M> for Column<M> {
+    fn into_projections(self) -> Vec<Projection<M>> {
+        vec![self.into()]
+    }
+}
+
+impl<M> IntoProjections<M> for Projection<M> {
+    fn into_projections(self) -> Vec<Projection<M>> {
+        vec![self]
+    }
+}
+
+impl<M, P: Into<Projection<M>>> IntoProjections<M> for Vec<P> {
+    fn into_projections(self) -> Vec<Projection<M>> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<M, P: Into<Projection<M>>, const N: usize> IntoProjections<M> for [P; N] {
+    fn into_projections(self) -> Vec<Projection<M>> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+macro_rules! impl_into_projections_for_tuples {
+    ($(($($t:ident),+)),+ $(,)?) => {$(
+        #[allow(non_snake_case)]
+        impl<M, $($t: Into<Projection<M>>),+> IntoProjections<M> for ($($t,)+) {
+            fn into_projections(self) -> Vec<Projection<M>> {
+                let ($($t,)+) = self;
+                vec![$($t.into()),+]
+            }
+        }
+    )+};
+}
+
+impl_into_projections_for_tuples! {
+    (A),
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L),
 }
 
 /// Sort direction for `ORDER BY`.
@@ -474,6 +753,15 @@ mod tests {
         assert_eq!(render(Expr::all()), "TRUE");
         assert_eq!(render(Expr::any_of([])), "FALSE");
         assert_eq!(render(Expr::raw("lower(a) = ?", ["x"])), "(lower(a) = $1)");
+        assert_eq!(
+            render(A.sum().cast("BIGINT").gt(5)),
+            r#"CAST(SUM("a") AS BIGINT) > $1"#
+        );
+        assert_eq!(render(Projection::count_all().gte(2)), "COUNT(*) >= $1");
+        assert_eq!(
+            render(B.count_distinct().eq(1)),
+            r#"COUNT(DISTINCT "b") = $1"#
+        );
     }
 
     #[test]

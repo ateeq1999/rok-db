@@ -10,6 +10,9 @@ An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github
 - **Typed, model-scoped columns** — `User::EMAIL.eq(..)` can't be used to filter `Post`s, and typos are compile errors.
 - **One executor story** — every method accepts `&Db`, `&mut Tx`, `&PgPool` or `&mut PgConnection`.
 - **`Send` futures everywhere** — works in `tokio::spawn`, axum handlers, etc.
+- **Relations without N+1** — `belongs_to`, `has_many`, `has_one` with batched eager loading.
+- **Batteries included** — streaming, aggregates and projections, automatic timestamps,
+  memoized (cached) queries and structured query logging.
 - **Escape hatches** — `Expr::raw`, `rok_db::raw(..)`, `to_sql()` on every builder, and full access to sqlx.
 
 ## Install
@@ -90,6 +93,19 @@ struct Post {
 
 Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`, `Post::CREATED_AT`.
 
+| Attribute | On | Meaning |
+|---|---|---|
+| `table = "name"` | struct | table name (default: snake_case plural) |
+| `timestamps` | struct | manage `created_at` / `updated_at` automatically |
+| `has_many(posts = Post::USER_ID)` | struct | one-to-many relation → `User::POSTS`, `user.posts()` |
+| `has_one(profile = Profile::USER_ID)` | struct | one-to-one relation → `User::PROFILE`, `user.profile()` |
+| `primary_key` | field | primary key (default: `id`) |
+| `generated` | field | filled in by the database; never written |
+| `column = "name"` | field | column name differs from the field |
+| `skip` | field | not a column |
+| `created_at` / `updated_at` | field | managed timestamp with a custom name |
+| `belongs_to = User` | field | `user_id` → `Post::USER`, `post.user()` (or `belongs_to(author = User)`) |
+
 ## API overview
 
 | On the model (`User::…`) | |
@@ -117,10 +133,136 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `paginate(db, page, per_page)` | `Page<T>` with `total`, `total_pages()`, `has_next()` — one round trip |
 | `update().set(..)/increment(..)/set_raw(..)` | turn into a bulk `UPDATE` |
 | `delete(db)` | bulk `DELETE` |
+| `stream(db)` | rows one at a time |
+| `sum`, `avg`, `min`, `max` | aggregates over the matching rows |
+| `group_by`, `having`, `select(..)` | projections and grouped aggregates |
+| `memoize(ttl)` | cache the result (see below) |
 | `to_sql()` | inspect the generated SQL and parameters |
 
 Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in between is_null is_not_null asc desc`.
 Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, or `Expr::raw("lower(email) = ?", [v])`.
+
+### Relations
+
+```rust
+#[derive(Model)]
+#[rok(has_many(posts = Post::USER_ID))]
+struct User { id: i64, name: String }
+
+#[derive(Model)]
+struct Post {
+    id: i64,
+    #[rok(belongs_to = User)]
+    user_id: i64,
+    title: String,
+}
+
+// Lazy: a query you can refine
+let recent = user.posts().order_by(Post::ID.desc()).limit(5).all(&db).await?;
+let author = post.user().one(&db).await?;
+
+// Eager: one extra query for any number of records (no N+1)
+let users = User::all(&db).await?;
+let posts = User::POSTS.load(&db, &users).await?;
+for user in &users {
+    println!("{}: {} posts", user.name, posts.get(user).len());
+}
+let authors = Post::USER.load(&db, &recent).await?;   // `authors.get(&post)`
+```
+
+### Streaming
+
+```rust
+use rok_db::prelude::*; // brings `try_next`, `try_collect`, … into scope
+
+let mut users = User::query().stream(&db);
+while let Some(user) = users.try_next().await? {
+    // rows arrive one at a time; memory stays flat
+}
+```
+
+### Aggregates and projections
+
+```rust
+let total: Option<i64> = Post::query().sum(&db, Post::VIEWS).await?;
+let avg_age: Option<f64> = User::query().avg(&db, User::AGE).await?;
+let oldest: Option<i32> = User::query().max(&db, User::AGE).await?;
+
+// GROUP BY / HAVING into tuples…
+let per_author: Vec<(i64, i64)> = Post::query()
+    .group_by(Post::USER_ID)
+    .having(Projection::count_all().gte(10))
+    .select((Post::USER_ID, Projection::count_all()))
+    .fetch_all(&db)
+    .await?;
+
+// …or into your own structs
+#[derive(rok_db::FromRow)]
+struct RoleStats { role: String, users: i64 }
+
+let stats: Vec<RoleStats> = User::query()
+    .group_by(User::ROLE)
+    .select((User::ROLE, Projection::count_all().alias("users")))
+    .fetch_all(&db)
+    .await?;
+```
+
+Aggregates: `count`, `count_distinct`, `sum`, `avg`, `min`, `max`, plus `.cast("BIGINT")` and
+`Projection::raw(..)`.
+
+### Timestamps
+
+```rust
+#[derive(Model)]
+#[rok(timestamps)]
+struct Note {
+    id: i64,
+    body: String,
+    created_at: chrono::DateTime<chrono::Utc>,   // set to now() on insert
+    updated_at: chrono::DateTime<chrono::Utc>,   // set to now() on insert and every update
+}
+```
+
+The database clock is used (`now()`), so values are consistent across servers. Bulk updates
+set `updated_at` too, unless you set it yourself.
+
+### Memoized queries
+
+Cache read results in memory, with automatic invalidation:
+
+```rust
+let db = Db::builder().query_cache(10_000).connect(url).await?;
+
+let admins = User::filter(User::ROLE.eq("admin"))
+    .memoize(Duration::from_secs(60))
+    .all(&db)                       // also: first, one, count, exists, paginate
+    .await?;
+
+db.cache().unwrap().stats();        // hits, misses, entries
+```
+
+- Entries expire after their TTL and are keyed by the exact SQL and parameters.
+- Any write rok-db makes to a table (insert, save, upsert, delete, bulk update/delete — in
+  transactions too, and again on commit) invalidates that table's cached results.
+- Writes rok-db can't see (other services, raw SQL, cascades and triggers on other tables) need `raw(..).invalidates("users")`,
+  `cache.invalidate("users")`, or a short TTL.
+- Without a configured cache (or with a plain sqlx pool), `memoize` simply runs the query.
+
+### Query logging
+
+Every statement is logged through [`tracing`](https://docs.rs/tracing):
+
+| target | level | content |
+|---|---|---|
+| `rok_db::query` | `DEBUG` | SQL, elapsed time, row count; failures with the error |
+| `rok_db::query` | `TRACE` | bound parameter values (may contain sensitive data) |
+| `rok_db::slow_query` | `WARN` | queries slower than the threshold (default 1s) |
+| `rok_db::cache` | `DEBUG` | memoized cache hits |
+
+```rust
+let db = Db::builder().slow_query_threshold(Duration::from_millis(200)).connect(url).await?;
+// e.g. RUST_LOG=rok_db=debug with tracing-subscriber's EnvFilter
+```
 
 ### Transactions
 

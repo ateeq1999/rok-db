@@ -3,38 +3,46 @@
 //! Most users should depend on the `rok-db` crate, which re-exports
 //! everything here together with the `#[derive(Model)]` macro.
 
+mod cache;
+mod context;
 mod db;
 mod error;
+mod exec;
 mod expr;
 mod model;
 mod page;
 mod query;
 mod raw;
+pub mod relation;
 mod sql;
 mod value;
 
+pub use cache::{CacheStats, QueryCache};
+pub use context::Executor;
 pub use db::{Db, DbBuilder, Tx};
 pub use error::{Error, Result};
-pub use expr::{Column, Direction, Expr, Order};
+pub use expr::{Column, Direction, Expr, IntoProjections, Order, Projection};
 pub use model::Model;
 pub use page::Page;
-pub use query::{Insert, Select, Update};
+pub use query::{Insert, Memoized, Projected, Select, Update};
 pub use raw::{Raw, raw};
+pub use relation::{BelongsTo, HasMany, HasOne};
 pub use sql::Sql;
 pub use value::Value;
 
-/// Anything that can run a query: [`&Db`](Db), `&mut Tx`, `&PgPool` or
-/// `&mut PgConnection`.
-pub use sqlx::postgres::PgExecutor as Executor;
-
 /// A boxed `Send` future, as returned by [`Db::transaction`] closures.
 pub use futures_core::future::BoxFuture;
+/// A boxed `Send` stream, as returned by [`Select::stream`].
+pub use futures_core::stream::BoxStream;
+/// Extension traits for consuming streams (`try_next`, `try_collect`, …).
+pub use futures_util::{StreamExt, TryStreamExt};
 
 /// The sqlx crate rok-db is built on, re-exported for advanced use.
 pub use sqlx;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::context::Context;
     pub use crate::model::__insert_sql;
     pub use crate::query::__paginate_sql;
     pub use sqlx::postgres::PgRow;
