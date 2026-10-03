@@ -102,6 +102,50 @@ impl Value {
         }
     }
 
+    /// Decode column `name` of `row` by its PostgreSQL type (used for keyset
+    /// cursors over aliased sort keys).
+    pub(crate) fn from_row_column(row: &sqlx::postgres::PgRow, name: &str) -> Result<Value> {
+        use sqlx::{Row, TypeInfo, ValueRef};
+        let (type_name, is_null) = {
+            let raw = row.try_get_raw(name)?;
+            (raw.type_info().name().to_owned(), raw.is_null())
+        };
+        if is_null {
+            return Err(crate::Error::InvalidQuery(format!(
+                "keyset sort key `{name}` is NULL; keyset pagination needs NOT NULL sort keys"
+            )));
+        }
+        Ok(match type_name.as_str() {
+            "BOOL" => Value::from(row.try_get::<bool, _>(name)?),
+            "INT2" => Value::from(row.try_get::<i16, _>(name)?),
+            "INT4" => Value::from(row.try_get::<i32, _>(name)?),
+            "INT8" => Value::from(row.try_get::<i64, _>(name)?),
+            "FLOAT4" => Value::from(row.try_get::<f32, _>(name)?),
+            "FLOAT8" => Value::from(row.try_get::<f64, _>(name)?),
+            "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
+                Value::from(row.try_get::<String, _>(name)?)
+            }
+            "BYTEA" => Value::from(row.try_get::<Vec<u8>, _>(name)?),
+            #[cfg(feature = "uuid")]
+            "UUID" => Value::from(row.try_get::<sqlx::types::Uuid, _>(name)?),
+            #[cfg(feature = "chrono")]
+            "TIMESTAMPTZ" => Value::from(
+                row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>, _>(name)?,
+            ),
+            #[cfg(feature = "chrono")]
+            "TIMESTAMP" => Value::from(row.try_get::<sqlx::types::chrono::NaiveDateTime, _>(name)?),
+            #[cfg(feature = "chrono")]
+            "DATE" => Value::from(row.try_get::<sqlx::types::chrono::NaiveDate, _>(name)?),
+            #[cfg(feature = "chrono")]
+            "TIME" => Value::from(row.try_get::<sqlx::types::chrono::NaiveTime, _>(name)?),
+            other => {
+                return Err(crate::Error::InvalidQuery(format!(
+                    "can't use a `{other}` value as a keyset sort key"
+                )));
+            }
+        })
+    }
+
     /// Encode in PostgreSQL's binary format; `None` for `NULL`.
     pub(crate) fn encode_binary(&self) -> Result<Option<Vec<u8>>> {
         fn enc<T: for<'q> Encode<'q, Postgres>>(

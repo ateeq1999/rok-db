@@ -46,10 +46,13 @@ pub(crate) struct Inner {
 
 struct Entry {
     value: Arc<dyn Any + Send + Sync>,
-    table: &'static str,
-    generation: u64,
+    /// Every table the result was read from, with its generation then.
+    tables: Stamp,
     expires: Instant,
 }
+
+/// The generations of the tables a query reads, taken before it runs.
+pub(crate) type Stamp = Vec<(&'static str, u64)>;
 
 /// Counters describing how a [`QueryCache`] is performing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,7 +128,8 @@ pub(crate) fn apply_remote(inner: &Mutex<Inner>, table: &str) {
 impl Inner {
     fn invalidate(&mut self, table: &str) {
         *self.generations.entry(table.to_owned()).or_default() += 1;
-        self.entries.retain(|_, e| e.table != table);
+        self.entries
+            .retain(|_, e| !e.tables.iter().any(|(t, _)| *t == table));
     }
 
     fn clear(&mut self) {
@@ -148,18 +152,18 @@ impl QueryCache {
         }
     }
 
-    /// Current generation of `table`; results computed under an older
-    /// generation are discarded instead of stored.
-    pub(crate) fn generation(&self, table: &str) -> u64 {
+    /// The current generations of `tables`; a result computed under an
+    /// older generation of any of them is discarded instead of stored.
+    pub(crate) fn stamp(&self, tables: &[&'static str]) -> Stamp {
         let inner = self.lock();
-        inner.generation(table)
+        tables.iter().map(|t| (*t, inner.generation(t))).collect()
     }
 
     pub(crate) fn get<T: Clone + 'static>(&self, key: &str) -> Option<T> {
         let mut inner = self.lock();
         let now = Instant::now();
         let fresh = inner.entries.get(key).and_then(|e| {
-            (e.expires > now && e.generation == inner.generation(e.table))
+            (e.expires > now && inner.is_current(&e.tables))
                 .then(|| e.value.downcast_ref::<T>().cloned())
                 .flatten()
         });
@@ -181,13 +185,12 @@ impl QueryCache {
     pub(crate) fn put<T: Send + Sync + 'static>(
         &self,
         key: String,
-        table: &'static str,
-        generation: u64,
+        tables: Stamp,
         ttl: Duration,
         value: T,
     ) {
         let mut inner = self.lock();
-        if generation != inner.generation(table) {
+        if !inner.is_current(&tables) {
             return; // A write happened while the query ran.
         }
         let now = Instant::now();
@@ -208,8 +211,7 @@ impl QueryCache {
             key,
             Entry {
                 value: Arc::new(value),
-                table,
-                generation,
+                tables,
                 expires: now + ttl,
             },
         );
@@ -217,6 +219,10 @@ impl QueryCache {
 }
 
 impl Inner {
+    fn is_current(&self, stamp: &Stamp) -> bool {
+        stamp.iter().all(|(t, g)| *g == self.generation(t))
+    }
+
     fn generation(&self, table: &str) -> u64 {
         let global = self.generations.get("").copied().unwrap_or(0);
         let table = self.generations.get(table).copied().unwrap_or(0);
@@ -244,21 +250,21 @@ mod tests {
     fn get_put_invalidate() {
         let cache = QueryCache::new(2);
         let ttl = Duration::from_secs(60);
-        let g = cache.generation("users");
-        cache.put("a".into(), "users", g, ttl, vec![1, 2]);
+        let g = cache.stamp(&["users"]);
+        cache.put("a".into(), g.clone(), ttl, vec![1, 2]);
         assert_eq!(cache.get::<Vec<i32>>("a"), Some(vec![1, 2]));
         assert_eq!(cache.get::<String>("a"), None, "type mismatch is a miss");
 
-        cache.put("a".into(), "users", g, ttl, vec![1, 2]);
+        cache.put("a".into(), g.clone(), ttl, vec![1, 2]);
         cache.invalidate("users");
         assert_eq!(cache.get::<Vec<i32>>("a"), None);
 
         // A result computed before an invalidation is not stored.
-        cache.put("b".into(), "users", g, ttl, 5);
+        cache.put("b".into(), g, ttl, 5);
         assert_eq!(cache.get::<i32>("b"), None);
 
-        let g = cache.generation("users");
-        cache.put("c".into(), "users", g, Duration::ZERO, 5);
+        let g = cache.stamp(&["users"]);
+        cache.put("c".into(), g, Duration::ZERO, 5);
         assert_eq!(cache.get::<i32>("c"), None, "expired");
 
         let stats = cache.stats();
@@ -266,18 +272,32 @@ mod tests {
     }
 
     #[test]
+    fn multi_table_entries() {
+        let cache = QueryCache::new(10);
+        let g = cache.stamp(&["posts", "users"]);
+        cache.put("joined".into(), g, Duration::from_secs(60), 1);
+        assert_eq!(cache.get::<i32>("joined"), Some(1));
+        cache.invalidate("users");
+        assert_eq!(
+            cache.get::<i32>("joined"),
+            None,
+            "any joined table invalidates"
+        );
+    }
+
+    #[test]
     fn capacity_and_clear() {
         let cache = QueryCache::new(2);
         let ttl = Duration::from_secs(60);
         for (i, key) in ["a", "b", "c"].into_iter().enumerate() {
-            let g = cache.generation("t");
-            cache.put(key.into(), "t", g, ttl + Duration::from_secs(i as u64), i);
+            let g = cache.stamp(&["t"]);
+            cache.put(key.into(), g, ttl + Duration::from_secs(i as u64), i);
         }
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.get::<usize>("a"), None, "oldest evicted");
-        let g = cache.generation("other");
+        let g = cache.stamp(&["other"]);
         cache.clear();
-        cache.put("d".into(), "other", g, ttl, 1);
+        cache.put("d".into(), g, ttl, 1);
         assert_eq!(cache.get::<usize>("d"), None);
     }
 }
