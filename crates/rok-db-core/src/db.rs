@@ -1,5 +1,6 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
@@ -10,7 +11,8 @@ use sqlx::postgres::{
 };
 use sqlx::{Describe, Either, Execute, Postgres};
 
-use crate::{Error, Result};
+use crate::context::Context;
+use crate::{Error, QueryCache, Result};
 
 /// A pooled PostgreSQL connection handle — the entry point of rok-db.
 ///
@@ -24,6 +26,7 @@ use crate::{Error, Result};
 #[derive(Clone)]
 pub struct Db {
     pool: PgPool,
+    ctx: Arc<Context>,
 }
 
 impl Db {
@@ -44,7 +47,15 @@ impl Db {
 
     /// Wrap an existing sqlx pool.
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            ctx: Arc::default(),
+        }
+    }
+
+    /// The query cache, if enabled with [`DbBuilder::query_cache`].
+    pub fn cache(&self) -> Option<&QueryCache> {
+        self.ctx.cache.as_ref()
     }
 
     /// The underlying sqlx pool, for anything rok-db doesn't cover.
@@ -60,7 +71,11 @@ impl Db {
     /// Start a transaction. It is rolled back on drop unless
     /// [`Tx::commit`] is called.
     pub async fn begin(&self) -> Result<Tx> {
-        Ok(Tx(self.pool.begin().await?))
+        Ok(Tx {
+            inner: self.pool.begin().await?,
+            ctx: Some(self.ctx.clone()),
+            touched: Mutex::default(),
+        })
     }
 
     /// Run `f` inside a transaction, committing if it returns `Ok` and
@@ -132,6 +147,7 @@ impl fmt::Debug for Db {
         f.debug_struct("Db")
             .field("size", &self.pool.size())
             .field("idle", &self.pool.num_idle())
+            .field("cache", &self.ctx.cache)
             .finish()
     }
 }
@@ -140,9 +156,39 @@ impl fmt::Debug for Db {
 #[derive(Debug, Clone, Default)]
 pub struct DbBuilder {
     options: PgPoolOptions,
+    ctx: Context,
 }
 
 impl DbBuilder {
+    /// Enable the [query cache](QueryCache) used by
+    /// [`Select::memoize`](crate::Select::memoize), holding up to
+    /// `capacity` results.
+    pub fn query_cache(mut self, capacity: usize) -> Self {
+        self.ctx.cache = Some(QueryCache::new(capacity));
+        self
+    }
+
+    /// Use an existing [`QueryCache`], e.g. one shared by several pools.
+    pub fn with_query_cache(mut self, cache: QueryCache) -> Self {
+        self.ctx.cache = Some(cache);
+        self
+    }
+
+    /// Log queries slower than `threshold` at `WARN` level on the
+    /// `rok_db::slow_query` tracing target (default 1s, `Duration::ZERO`
+    /// disables it).
+    pub fn slow_query_threshold(mut self, threshold: Duration) -> Self {
+        self.ctx.slow_query = threshold;
+        self
+    }
+
+    fn build(self, pool: PgPool) -> Db {
+        Db {
+            pool,
+            ctx: Arc::new(self.ctx),
+        }
+    }
+
     /// Maximum number of pooled connections (default 10).
     pub fn max_connections(mut self, n: u32) -> Self {
         self.options = self.options.max_connections(n);
@@ -175,7 +221,8 @@ impl DbBuilder {
 
     /// Connect to `url` and return the pool.
     pub async fn connect(self, url: &str) -> Result<Db> {
-        Ok(Db::from_pool(self.options.connect(url).await?))
+        let pool = self.options.clone().connect(url).await?;
+        Ok(self.build(pool))
     }
 
     /// Connect using the `DATABASE_URL` environment variable.
@@ -186,14 +233,22 @@ impl DbBuilder {
         self.connect(&url).await
     }
 
+    /// Wrap an existing sqlx pool, applying this builder's rok-db settings
+    /// (pool options are ignored).
+    pub fn build_with_pool(self, pool: PgPool) -> Db {
+        self.build(pool)
+    }
+
     /// Connect with fully custom connect options.
     pub async fn connect_with(self, options: PgConnectOptions) -> Result<Db> {
-        Ok(Db::from_pool(self.options.connect_with(options).await?))
+        let pool = self.options.clone().connect_with(options).await?;
+        Ok(self.build(pool))
     }
 
     /// Create the pool without opening any connection until first use.
     pub fn connect_lazy(self, url: &str) -> Result<Db> {
-        Ok(Db::from_pool(self.options.connect_lazy(url)?))
+        let pool = self.options.clone().connect_lazy(url)?;
+        Ok(self.build(pool))
     }
 }
 
@@ -201,28 +256,45 @@ impl DbBuilder {
 ///
 /// Pass `&mut *tx` wherever an [`Executor`](crate::Executor) is expected.
 /// A transaction that is dropped without [`commit`](Tx::commit) is rolled back.
-pub struct Tx(sqlx::Transaction<'static, Postgres>);
+pub struct Tx {
+    inner: sqlx::Transaction<'static, Postgres>,
+    ctx: Option<Arc<Context>>,
+    touched: Mutex<Vec<&'static str>>,
+}
 
 impl Tx {
     /// Commit the transaction.
     pub async fn commit(self) -> Result<()> {
-        Ok(self.0.commit().await?)
+        self.inner.commit().await?;
+        // Results cached by other connections while this transaction was
+        // open still reflect the old data.
+        if let Some(cache) = self.ctx.as_ref().and_then(|c| c.cache.as_ref()) {
+            let touched = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+            for table in touched.iter() {
+                cache.invalidate(table);
+            }
+        }
+        Ok(())
     }
 
     /// Roll the transaction back.
     pub async fn rollback(self) -> Result<()> {
-        Ok(self.0.rollback().await?)
+        Ok(self.inner.rollback().await?)
     }
 
     /// The underlying sqlx transaction.
     pub fn inner(&mut self) -> &mut sqlx::Transaction<'static, Postgres> {
-        &mut self.0
+        &mut self.inner
     }
 }
 
 impl From<sqlx::Transaction<'static, Postgres>> for Tx {
-    fn from(tx: sqlx::Transaction<'static, Postgres>) -> Self {
-        Self(tx)
+    fn from(inner: sqlx::Transaction<'static, Postgres>) -> Self {
+        Self {
+            inner,
+            ctx: None,
+            touched: Mutex::default(),
+        }
     }
 }
 
@@ -230,19 +302,38 @@ impl Deref for Tx {
     type Target = PgConnection;
 
     fn deref(&self) -> &PgConnection {
-        &self.0
+        &self.inner
     }
 }
 
 impl DerefMut for Tx {
     fn deref_mut(&mut self) -> &mut PgConnection {
-        &mut self.0
+        &mut self.inner
     }
 }
 
 impl fmt::Debug for Tx {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Tx")
+    }
+}
+
+impl<'c> crate::Executor<'c> for &'c Db {
+    fn __context(&self) -> Option<Arc<Context>> {
+        Some(self.ctx.clone())
+    }
+}
+
+impl<'c> crate::Executor<'c> for &'c mut Tx {
+    fn __context(&self) -> Option<Arc<Context>> {
+        self.ctx.clone()
+    }
+
+    fn __touch(&self, table: &'static str) {
+        let mut touched = self.touched.lock().unwrap_or_else(|e| e.into_inner());
+        if !touched.contains(&table) {
+            touched.push(table);
+        }
     }
 }
 
@@ -303,4 +394,4 @@ macro_rules! delegate_executor {
 }
 
 delegate_executor!(&'c Db, |this| &this.pool);
-delegate_executor!(&'c mut Tx, |this| &mut *this.0);
+delegate_executor!(&'c mut Tx, |this| &mut *this.inner);

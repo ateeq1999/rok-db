@@ -57,6 +57,26 @@
 //! typed [`Column`] constant per field (`User::EMAIL`, …). See
 //! [`derive@Model`] for every attribute.
 //!
+//! ## Relations
+//!
+//! `#[rok(belongs_to = User)]`, `#[rok(has_many(posts = Post::USER_ID))]` and
+//! `#[rok(has_one(..))]` generate relation constants ([`BelongsTo`],
+//! [`HasMany`], [`HasOne`]) and lazy query methods. Eager-load related
+//! records for many parents with one extra query: see [`relation`].
+//!
+//! ## More features
+//!
+//! - **Streaming**: [`Select::stream`] yields rows one at a time.
+//! - **Aggregates & projections**: [`Select::sum`], [`Select::avg`],
+//!   [`Select::group_by`], [`Select::having`] and [`Select::select`] with
+//!   [`Projection`]s, decoded into tuples or [`derive@FromRow`] structs.
+//! - **Timestamps**: `#[rok(timestamps)]` manages `created_at`/`updated_at`.
+//! - **Memoization**: [`Select::memoize`] caches results in the pool's
+//!   [`QueryCache`] with automatic invalidation on writes.
+//! - **Query logging**: every statement is logged through `tracing`
+//!   (`rok_db::query` at DEBUG, `rok_db::slow_query` at WARN; see
+//!   [`DbBuilder::slow_query_threshold`]).
+//!
 //! ## Executors
 //!
 //! Every query method accepts any [`Executor`]: `&Db`, `&mut Tx` (write
@@ -85,7 +105,15 @@ pub use rok_db_core::*;
 /// Derive [`Model`] for a struct. See the [crate docs](crate) for an example.
 pub use rok_db_macros::Model;
 
+/// Derive `sqlx::FromRow` for a plain struct, without depending on sqlx.
+pub use rok_db_macros::FromRow;
+
 /// Everything you need for day-to-day use: `use rok_db::prelude::*;`
 pub mod prelude {
-    pub use crate::{Column, Db, Executor, Expr, Model, Page, Tx};
+    pub use crate::{Column, Db, Executor, Expr, Model, Page, Projection, Tx};
+    pub use futures_util_reexports::*;
+
+    mod futures_util_reexports {
+        pub use crate::{StreamExt as _, TryStreamExt as _};
+    }
 }

@@ -12,6 +12,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ateeq1999/rok-db"
 rust-version = "1.85"
+homepage = "https://github.com/ateeq1999/rok-db"
+authors = ["The rok-db Contributors"]
 
 [workspace.dependencies]
 rok-db-core = { path = "crates/rok-db-core", version = "0.1.0" }
@@ -21,3 +23,13 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "macros",
 ] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"

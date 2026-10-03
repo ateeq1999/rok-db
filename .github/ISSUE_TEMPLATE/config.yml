@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/ateeq1999/rok-db/discussions
+    about: Ask questions and discuss ideas before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/ateeq1999/rok-db/security/advisories/new
+    about: Report security issues privately. Please do not open a public issue.

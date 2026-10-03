@@ -15,25 +15,39 @@ use crate::Result;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
+    /// `BOOLEAN`
     Bool(Option<bool>),
+    /// `SMALLINT` (`INT2`)
     I16(Option<i16>),
+    /// `INTEGER` (`INT4`)
     I32(Option<i32>),
+    /// `BIGINT` (`INT8`)
     I64(Option<i64>),
+    /// `REAL` (`FLOAT4`)
     F32(Option<f32>),
+    /// `DOUBLE PRECISION` (`FLOAT8`)
     F64(Option<f64>),
+    /// `TEXT` / `VARCHAR`
     String(Option<String>),
+    /// `BYTEA`
     Bytes(Option<Vec<u8>>),
     #[cfg(feature = "uuid")]
+    /// `UUID`
     Uuid(Option<sqlx::types::Uuid>),
     #[cfg(feature = "chrono")]
+    /// `TIMESTAMPTZ`
     DateTime(Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>),
     #[cfg(feature = "chrono")]
+    /// `TIMESTAMP`
     NaiveDateTime(Option<sqlx::types::chrono::NaiveDateTime>),
     #[cfg(feature = "chrono")]
+    /// `DATE`
     NaiveDate(Option<sqlx::types::chrono::NaiveDate>),
     #[cfg(feature = "chrono")]
+    /// `TIME`
     NaiveTime(Option<sqlx::types::chrono::NaiveTime>),
     #[cfg(feature = "json")]
+    /// `JSONB` / `JSON`
     Json(Option<serde_json::Value>),
 }
 
