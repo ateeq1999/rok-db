@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ateeq1999/rok-db"
@@ -16,8 +16,8 @@ homepage = "https://github.com/ateeq1999/rok-db"
 authors = ["The rok-db Contributors"]
 
 [workspace.dependencies]
-rok-db-core = { path = "crates/rok-db-core", version = "0.1.0" }
-rok-db-macros = { path = "crates/rok-db-macros", version = "0.1.0" }
+rok-db-core = { path = "crates/rok-db-core", version = "0.2.0" }
+rok-db-macros = { path = "crates/rok-db-macros", version = "0.2.0" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",

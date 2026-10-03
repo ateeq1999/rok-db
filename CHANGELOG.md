@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-03
+
 ### Added
 
 - Shared cache invalidation: `DbBuilder::shared_cache_invalidation`
@@ -105,6 +107,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rok_db::cache`) and `DbBuilder::slow_query_threshold`.
 - `Model::value_of`, `Insert::set_raw`, `DbBuilder::build_with_pool`.
 
+### Fixed
+
+- `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
+  awaited, not when the future is created, so scopes such as
+  `with_tenant` apply to futures created outside them.
+
+### Changed
+
+- `Order` can target expressions; keyset pagination rejects expression
+  orders with `Error::InvalidQuery`.
+- `Executor` is now a rok-db trait (implemented for `&Db`, `&mut Tx`,
+  `&PgPool`, `&mut PgConnection` and `&mut PgListener`) so executors can
+  carry pool settings such as the query cache.
+
+## [0.1.0] - 2026-10-03
+
+### Added
+
 - `#[derive(Model)]` with `table`, `primary_key`, `generated`, `column`,
   `skip`, `no_from_row` and `crate` attributes; generates `Model`, `FromRow`
   and typed column constants.
@@ -126,19 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   governance, security policy, Code of Conduct, RFC process, issue and pull
   request templates, CI, Dependabot and cargo-deny configuration.
 
-### Fixed
-
-- `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
-  awaited, not when the future is created, so scopes such as
-  `with_tenant` apply to futures created outside them.
-
 ### Changed
 
-- `Order` can target expressions; keyset pagination rejects expression
-  orders with `Error::InvalidQuery`.
-- `Executor` is now a rok-db trait (implemented for `&Db`, `&mut Tx`,
-  `&PgPool`, `&mut PgConnection` and `&mut PgListener`) so executors can
-  carry pool settings such as the query cache.
 - Renamed the crates from `orm`, `orm-core` and `orm-macros` to `rok-db`,
   `rok-db-core` and `rok-db-macros`.
 

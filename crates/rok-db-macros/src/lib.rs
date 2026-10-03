@@ -990,6 +990,7 @@ fn expand_test(args: TokenStream2, item: syn::ItemFn) -> syn::Result<TokenStream
         vis,
         sig,
         block,
+        ..
     } = item;
     if sig.asyncness.is_none() {
         return Err(syn::Error::new(
