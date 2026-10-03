@@ -104,6 +104,10 @@
 //! - **Multi-instance caching**: [`DbBuilder::shared_cache_invalidation`].
 //! - **Multi-tenancy**: `#[rok(tenant)]` and [`tenant::with_tenant`].
 //! - **Audit log** (feature `json`): the [`audit`] module.
+//! - **Joins**: [`Select::join`] / [`Select::left_join`] with compile-time
+//!   checked columns across models (see [`join`]).
+//! - **Composite primary keys**: several `#[rok(primary_key)]` fields;
+//!   look records up with tuples ([`IntoKey`]).
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`
@@ -167,3 +171,48 @@ pub mod prelude {
         pub use crate::{StreamExt as _, TryStreamExt as _};
     }
 }
+
+/// Compile-time guarantees, checked by doctests.
+///
+/// A joined query rejects columns of models that aren't part of it:
+///
+/// ```compile_fail
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+/// #[derive(Model)] struct Tag { id: i64, label: String }
+///
+/// // `Tag` was never joined.
+/// let _ = Post::query().join(Post::USER).filter(Tag::LABEL.eq("x"));
+/// ```
+///
+/// while the same filter on a joined model compiles:
+///
+/// ```
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+///
+/// let _ = Post::query().join(Post::USER).filter(User::NAME.eq("x"));
+/// ```
+///
+/// Only joined models can be fetched as tuples:
+///
+/// ```compile_fail
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+/// #[derive(Model)] struct Tag { id: i64, label: String }
+///
+/// let _ = Post::query().join(Post::USER).with_sql::<Tag, _>();
+/// ```
+///
+/// ```
+/// use rok_db::prelude::*;
+/// #[derive(Model)] struct User { id: i64, name: String }
+/// #[derive(Model)] struct Post { id: i64, #[rok(belongs_to = User)] user_id: i64 }
+///
+/// let _ = Post::query().join(Post::USER).with_sql::<(User, Option<User>), _>();
+/// ```
+#[doc(hidden)]
+pub mod __compile_checks {}

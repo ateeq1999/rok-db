@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use rok_db::prelude::*;
 use rok_db::testing::TestDb;
-use rok_db::{ChangeOp, Error, raw};
+use rok_db::{ChangeOp, raw};
 
 #[derive(Debug, Clone, PartialEq, Model)]
 struct Doc {
@@ -146,12 +146,21 @@ async fn full_text_search(db: Db) {
         .unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items[0].title, "rust orm");
-    let err = Doc::query()
-        .order_by(Doc::BODY.search_rank("x").desc())
+    // Keyset pagination works through expression orders.
+    let rank = || Doc::BODY.search_rank("queries builder").desc();
+    let first = Doc::query()
+        .order_by(rank())
         .cursor_paginate(&db, None, 2)
         .await
-        .unwrap_err();
-    assert!(matches!(err, Error::InvalidQuery(_)));
+        .unwrap();
+    let rest = Doc::query()
+        .order_by(rank())
+        .cursor_paginate(&db, first.next.as_ref(), 2)
+        .await
+        .unwrap();
+    assert_eq!(titles(first.items)[0], "rust orm");
+    assert_eq!(rest.items.len(), 1);
+    assert!(rest.next.is_none());
 }
 
 #[cfg(feature = "json")]

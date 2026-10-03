@@ -160,6 +160,25 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 Column operators: `eq ne gt gte lt lte like not_like ilike contains starts_with ends_with is_in not_in in_subquery not_in_subquery eq_outer between is_null is_not_null asc desc`.
 Combine expressions with `.and(..)`, `.or(..)`, `!expr`, `Expr::all_of(..)`, `Expr::any_of(..)`, `Expr::exists(..)`, `Expr::not_exists(..)`, or `Expr::raw("lower(email) = ?", [v])`.
 
+### Composite primary keys
+
+```rust
+#[derive(Model)]
+struct Membership {
+    #[rok(primary_key)] org_id: i64,
+    #[rok(primary_key)] user_id: i64,
+    role: String,
+}
+
+Membership::find(&db, (org_id, user_id)).await?;            // tuple in key-field order
+Membership::find_many(&db, [(1, 2), (1, 3)]).await?;
+membership.save(&db).await?;                                // WHERE org_id = $ AND user_id = $
+```
+
+Everything that identifies a row — `save`, `delete`, `reload`, `upsert`, optimistic locking, keyset
+pagination tiebreakers, change feeds and the audit log — uses the whole key. Relations still need a
+single-column key on the parent side.
+
 ### Relations
 
 ```rust
@@ -373,7 +392,53 @@ let without_posts = User::filter(Expr::not_exists(
 )).all(&db).await?;
 ```
 
-Joins are designed in [RFC 0001](docs/rfcs/0001-joins.md) and not implemented yet.
+### Joins
+
+```rust
+// Join through a relation; filter, order and select across both models.
+let rows: Vec<(String, String)> = Post::query()
+    .join(Post::AUTHOR)                          // belongs_to: INNER JOIN users ON users.id = posts.author_id
+    .filter(User::ROLE.eq("admin"))
+    .order_by(User::NAME.asc())
+    .select((Post::TITLE, User::NAME))
+    .fetch_all(&db)
+    .await?;
+
+// Root models through has_many joins come back once each, in your order.
+let authors: Vec<User> = User::query()
+    .join(User::POSTS)
+    .filter(Post::VIEWS.gt(1000))
+    .order_by(Post::VIEWS.desc())               // each user ranked by their best post
+    .paginate(&db, 1, 20)
+    .await?
+    .items;
+
+// LEFT JOIN, ad-hoc conditions, grouping, chains.
+let per_user: Vec<(String, i64)> = User::query()
+    .left_join(User::POSTS)
+    .group_by(User::NAME)
+    .select((User::NAME, Post::ID.count()))      // 0 for users without posts
+    .fetch_all(&db)
+    .await?;
+Post::query().left_join(Category::ID.on(Post::CATEGORY_ID));
+Comment::query().join(Comment::POST).join(Post::AUTHOR).filter(User::ROLE.eq("admin"));
+
+// Whole models as tuples (RFC 0004); `Option` for LEFT JOINs.
+let rows: Vec<(Post, (User, Option<Category>))> = Post::query()
+    .join(Post::AUTHOR)
+    .left_join(Category::ID.on(Post::CATEGORY_ID))
+    .all_with::<(User, Option<Category>), _>(&db)
+    .await?;
+
+// Keyset pagination, caching and bulk writes work through joins too.
+let page = Post::query().join(Post::AUTHOR).order_by(User::NAME).cursor_paginate(&db, None, 50).await?;
+Post::query().join(Post::AUTHOR).filter(User::ROLE.eq("banned")).delete(&db).await?;
+```
+
+Using a column of a model that isn't part of the query is a compile error. Joined models'
+tenant, soft-delete and default scopes apply in the `ON` clause. Memoized joined queries are
+invalidated by writes to any of their tables. See [RFC 0001](docs/rfcs/0001-joins.md) for
+the design. Self-joins (the same table twice) are not supported yet.
 
 ### Custom column types
 

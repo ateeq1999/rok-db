@@ -64,6 +64,8 @@ CREATE OR REPLACE FUNCTION rok_db_audit() RETURNS trigger LANGUAGE plpgsql AS $r
 DECLARE
     old_j jsonb;
     new_j jsonb;
+    j jsonb;
+    keys text[] := string_to_array(TG_ARGV[0], ',');
     excluded text[] := TG_ARGV[2:];
     changed text[] := '{}';
 BEGIN
@@ -75,10 +77,11 @@ BEGIN
         WHERE new_j -> k IS DISTINCT FROM old_j -> k;
         IF cardinality(changed) = 0 THEN RETURN NULL; END IF;
     END IF;
+    IF TG_OP = 'DELETE' THEN j := to_jsonb(OLD); ELSE j := to_jsonb(NEW); END IF;
     INSERT INTO rok_audit_log (table_name, record_key, op, actor, old_data, new_data, changed)
     VALUES (
         TG_ARGV[1],
-        coalesce(new_j, old_j) ->> TG_ARGV[0],
+        __KEY__,
         TG_OP,
         nullif(current_setting('rok.actor', true), ''),
         old_j,
@@ -102,14 +105,18 @@ fn literal(s: &str) -> String {
 
 /// Create the `rok_audit_log` table and the trigger function (idempotent).
 pub async fn install(db: &Db) -> Result<()> {
-    db.execute(INSTALL).await?;
+    db.execute(&INSTALL.replace("__KEY__", crate::key::TRIGGER_KEY_SQL))
+        .await?;
     Ok(())
 }
 
 /// Start auditing `M`'s table, leaving the `exclude`d columns (secrets,
 /// large blobs) out of the recorded data. Re-running replaces the trigger.
 pub async fn enable<M: Model>(db: &Db, exclude: &[Column<M>]) -> Result<()> {
-    let mut args = vec![literal(M::PRIMARY_KEY), literal(M::TABLE)];
+    let mut args = vec![
+        literal(&crate::key::key_columns_arg::<M>()),
+        literal(M::TABLE),
+    ];
     args.extend(exclude.iter().map(|c| literal(c.name())));
     let table = quoted(M::TABLE);
     db.execute(&format!(
@@ -132,15 +139,21 @@ pub async fn disable<M: Model>(db: &Db) -> Result<()> {
     Ok(())
 }
 
-/// Every audit entry of one `M` record, oldest first.
+/// Every audit entry of one `M` record, oldest first. Pass a tuple for
+/// composite keys.
 pub async fn history<'e, M: Model>(
     executor: impl Executor<'e>,
-    key: impl Into<Value>,
+    key: impl crate::IntoKey,
 ) -> Result<Vec<AuditEntry>> {
+    let values = key.into_key();
     AuditEntry::for_table::<M>()
         .filter(Expr::raw(
-            format!("{} = ?::text", quoted("record_key")),
-            [key.into()],
+            format!(
+                "{} = {}",
+                quoted("record_key"),
+                crate::key::key_param_sql(values.len())
+            ),
+            values,
         ))
         .order_by(AuditEntry::ID)
         .all(executor)
@@ -155,7 +168,8 @@ pub struct AuditEntry {
     pub id: i64,
     /// The audited table (as named by the model).
     pub table_name: String,
-    /// The record's primary key, as text.
+    /// The record's primary key, as text (a JSON array of texts for
+    /// composite keys).
     pub record_key: Option<String>,
     /// `INSERT`, `UPDATE` or `DELETE`.
     pub op: String,

@@ -1,5 +1,7 @@
 - Feature name: `joins`
 - Start date: 2026-10-03
+- Status: **Accepted** (2026-10-03) — implemented in the first version described under
+  "Decisions" below
 - RFC PR: to be assigned when this RFC's pull request is opened
 - Tracking issue: to be opened on acceptance
 
@@ -154,16 +156,33 @@ building on the relations rok-db already generates.
 Additive. `Select<M>` keeps its meaning through the defaulted parameter. No
 change to SQL generated for existing queries. No MSRV impact.
 
-# Unresolved questions
+# Decisions
 
-1. Should `.all()` on a `has_many` join add `DISTINCT` automatically, or
-   require an explicit `.distinct()`?
-2. How should joined models be returned when users want them, e.g. `Vec<(Post, User)>`?
-   This needs prefixed column aliases, so it could be split into its own RFC.
-3. Naming: `left_join` versus `join_optional`.
+The open questions were resolved by the maintainer:
+
+1. Fetching root models from a join that may multiply rows (`has_many` or ad-hoc
+   joins) de-duplicates automatically with `DISTINCT ON` the root primary key; the
+   requested ordering is preserved. Counts use `COUNT(DISTINCT key)`.
+2. Returning joined models as tuples (`Vec<(Post, User)>`) is left to a follow-up
+   RFC; joins ship for filtering, ordering, grouping and selecting columns.
+3. The optional join is named `left_join`.
+
+Scope of the first implementation: the typed builder (`Joined<M, J>`) with
+`join`/`left_join` from relations or ad-hoc column pairs, `filter`, `order_by`,
+`group_by`, `having`, `limit`, `offset`, `select(..)` across models, and `all`,
+`first`, `one`, `count`, `exists`, `paginate`, `stream`.
+
+Added afterwards: `cursor_paginate` (sort keys are aliased in a wrapped subquery, which also
+allows expression orders), `memoize` (cache entries are invalidated by writes to any joined
+table), `update` / `delete` / `force_delete` / `restore` (implemented as
+`WHERE pk IN (SELECT root.pk FROM … JOIN …)` rather than `UPDATE … FROM`, so hooks-free
+bulk semantics and scopes stay the same), and tuples via [RFC 0004](0004-joined-tuples.md).
+Self-joins are still unsupported: see Future possibilities.
 
 # Future possibilities
 
-- Self-joins with aliases (`User::alias("manager")`).
-- `UPDATE … FROM` / `DELETE … USING`.
+- Self-joins with aliases (`User::alias("manager")`). These need a design of their own.
+  Columns are typed by model (`User::NAME`), so two instances of `User` in one query
+  need an aliased column type (for example `Aliased<User, Manager>`) that the scope
+  proofs, rendering and tuple decoding all understand.
 - Eager loading built on joins for `belongs_to` (one query instead of two).

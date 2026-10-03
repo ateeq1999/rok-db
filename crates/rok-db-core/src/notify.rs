@@ -129,7 +129,8 @@ pub enum ChangeOp {
 pub struct Change<M> {
     /// What happened.
     pub op: ChangeOp,
-    /// The primary key of the row, as text.
+    /// The primary key of the row, as text (a JSON array of texts for
+    /// composite keys, e.g. `["7","42"]`).
     pub key: String,
     _model: PhantomData<fn() -> M>,
 }
@@ -138,8 +139,8 @@ impl<M: Model> Change<M> {
     /// Load the current row (`None` if it was deleted since). Default and
     /// soft-delete scopes are ignored.
     pub async fn fetch<'e, E: Executor<'e>>(&self, executor: E) -> Result<Option<M>> {
-        let pk = quoted(M::PRIMARY_KEY);
-        M::filter(Expr::raw(format!("{pk}::text = ?"), [self.key.as_str()]))
+        let key_sql = crate::key::key_text_sql::<M>();
+        M::filter(Expr::raw(format!("{key_sql} = ?"), [self.key.as_str()]))
             .with_trashed()
             .unscoped()
             .on_primary()
@@ -254,10 +255,14 @@ pub(crate) fn install_sql<M: Model>() -> Result<String> {
     let table = quoted(M::TABLE);
     Ok(format!(
         r#"CREATE OR REPLACE FUNCTION rok_db_notify_change() RETURNS trigger LANGUAGE plpgsql AS $rok$
-DECLARE rec record;
+DECLARE
+    rec record;
+    j jsonb;
+    keys text[] := string_to_array(TG_ARGV[1], ',');
 BEGIN
     IF TG_OP = 'DELETE' THEN rec := OLD; ELSE rec := NEW; END IF;
-    PERFORM pg_notify(TG_ARGV[0], TG_OP || ':' || coalesce(to_jsonb(rec) ->> TG_ARGV[1], ''));
+    j := to_jsonb(rec);
+    PERFORM pg_notify(TG_ARGV[0], TG_OP || ':' || coalesce({key}, ''));
     RETURN NULL;
 END
 $rok$;
@@ -265,7 +270,8 @@ DROP TRIGGER IF EXISTS rok_db_notify_change ON {table};
 CREATE TRIGGER rok_db_notify_change AFTER INSERT OR UPDATE OR DELETE ON {table}
     FOR EACH ROW EXECUTE FUNCTION rok_db_notify_change({}, {});"#,
         literal(&channel),
-        literal(M::PRIMARY_KEY),
+        literal(&crate::key::key_columns_arg::<M>()),
+        key = crate::key::TRIGGER_KEY_SQL,
     ))
 }
 

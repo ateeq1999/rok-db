@@ -85,10 +85,10 @@ enum Lock {
 /// Builders are cheap, cloneable values: nothing touches the database until
 /// one of the async terminal methods (`all`, `first`, `count`, …) is awaited.
 pub struct Select<M> {
-    filters: Vec<Cond>,
-    order: Vec<Order<M>>,
-    group_by: Vec<&'static str>,
-    having: Vec<Cond>,
+    pub(crate) filters: Vec<Cond>,
+    pub(crate) order: Vec<Order<M>>,
+    pub(crate) group_by: Vec<(&'static str, &'static str)>,
+    pub(crate) having: Vec<Cond>,
     limit: Option<u64>,
     offset: Option<u64>,
     lock: Option<Lock>,
@@ -96,7 +96,26 @@ pub struct Select<M> {
     scoped: bool,
     primary: bool,
     all_tenants: bool,
+    pub(crate) joins: Vec<JoinClause>,
     _model: PhantomData<fn() -> M>,
+}
+
+/// One `JOIN` of a [`Joined`](crate::Joined) query.
+#[derive(Debug, Clone)]
+pub(crate) struct JoinClause {
+    pub(crate) left: bool,
+    pub(crate) table: &'static str,
+    pub(crate) on: Cond,
+    /// The joined model's implicit conditions (tenant, soft delete, default
+    /// scope), evaluated at render time.
+    pub(crate) scope: fn() -> Vec<Cond>,
+    /// Whether this join can produce several rows per root row.
+    pub(crate) multiplies: bool,
+}
+
+/// The implicit conditions of a joined model `N`.
+pub(crate) fn join_scope<N: Model>() -> Vec<Cond> {
+    implicit::<N>(Trashed::Exclude, true, false)
 }
 
 impl<M: Model> Default for Select<M> {
@@ -120,6 +139,7 @@ impl<M: Model> Select<M> {
             scoped: true,
             primary: false,
             all_tenants: false,
+            joins: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -209,7 +229,7 @@ impl<M: Model> Select<M> {
 
     /// Append a `GROUP BY` column; combine with [`select`](Self::select).
     pub fn group_by(mut self, column: Column<M>) -> Self {
-        self.group_by.push(column.name());
+        self.group_by.push((M::TABLE, column.name()));
         self
     }
 
@@ -284,20 +304,102 @@ impl<M: Model> Select<M> {
 
     /// Render the `SELECT` statement.
     pub fn to_sql(&self) -> Sql {
-        let mut sql = Sql::new();
+        let mut sql = self.new_sql();
+        if self.multiplies() {
+            self.write_distinct_rows(&mut sql, "", self.limit, self.offset);
+            return sql;
+        }
         sql.push("SELECT ");
         push_columns::<M>(&mut sql);
         self.write_tail(&mut sql);
         sql
     }
 
+    /// A statement buffer; columns are table-qualified when there are joins.
+    pub(crate) fn new_sql(&self) -> Sql {
+        let mut sql = Sql::new();
+        sql.qualify = !self.joins.is_empty();
+        sql
+    }
+
+    /// Whether fetching root rows needs de-duplication: a join may produce
+    /// several rows per root row and there is no `GROUP BY`.
+    fn multiplies(&self) -> bool {
+        self.group_by.is_empty() && self.joins.iter().any(|j| j.multiplies)
+    }
+
+    fn write_primary_keys(sql: &mut Sql) {
+        sql.push_list(M::PRIMARY_KEYS, ", ", |sql, c| {
+            sql.push_column(M::TABLE, c);
+        });
+    }
+
+    /// One row per root record for a query whose joins may multiply rows:
+    ///
+    /// ```sql
+    /// SELECT <head> d.* FROM (
+    ///     SELECT DISTINCT ON (pk) <columns>, <order keys> AS __rok_o{i}
+    ///     FROM … WHERE … ORDER BY pk, <order>
+    /// ) d ORDER BY d.__rok_o{i} … LIMIT … OFFSET …
+    /// ```
+    fn write_distinct_rows(
+        &self,
+        sql: &mut Sql,
+        head: &str,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) {
+        sql.push("SELECT ")
+            .push(head)
+            .push(r#""__rok_d".* FROM (SELECT DISTINCT ON ("#);
+        Self::write_primary_keys(sql);
+        sql.push(") ");
+        push_columns::<M>(sql);
+        self.write_order_aliases(sql);
+        self.write_from_where(sql);
+        sql.push(" ORDER BY ");
+        Self::write_primary_keys(sql);
+        for o in &self.order {
+            sql.push(", ");
+            o.write(sql);
+        }
+        sql.push(r#") "__rok_d""#);
+        self.write_alias_order(sql, r#""__rok_d"."#);
+        if let Some(limit) = limit {
+            sql.push(&format!(" LIMIT {limit}"));
+        }
+        if let Some(offset) = offset {
+            sql.push(&format!(" OFFSET {offset}"));
+        }
+    }
+
+    /// `, <order key> AS "__rok_o{i}"` for every order term.
+    fn write_order_aliases(&self, sql: &mut Sql) {
+        for (i, o) in self.order.iter().enumerate() {
+            sql.push(", ");
+            o.write_key(sql, "", None);
+            sql.push(" AS ").push_ident(&format!("__rok_o{i}"));
+        }
+    }
+
+    /// ` ORDER BY <prefix>"__rok_o{i}" …` for every order term.
+    fn write_alias_order(&self, sql: &mut Sql, prefix: &str) {
+        if !self.order.is_empty() {
+            sql.push(" ORDER BY ")
+                .push_list(self.order.iter().enumerate(), ", ", |sql, (i, o)| {
+                    sql.push(prefix).push_ident(&format!("__rok_o{i}"));
+                    o.write_direction(sql);
+                });
+        }
+    }
+
     /// Everything after the select list.
-    fn write_tail(&self, sql: &mut Sql) {
+    pub(crate) fn write_tail(&self, sql: &mut Sql) {
         self.write_from_where(sql);
         if !self.group_by.is_empty() {
             sql.push(" GROUP BY ")
-                .push_list(&self.group_by, ", ", |sql, c| {
-                    sql.push_ident(c);
+                .push_list(&self.group_by, ", ", |sql, (t, c)| {
+                    sql.push_column(t, c);
                 });
         }
         push_where(sql, " HAVING ", &self.having);
@@ -317,6 +419,21 @@ impl<M: Model> Select<M> {
 
     fn write_from_where(&self, sql: &mut Sql) {
         sql.push(" FROM ").push_ident(M::TABLE);
+        for join in &self.joins {
+            sql.push(if join.left {
+                " LEFT JOIN "
+            } else {
+                " INNER JOIN "
+            })
+            .push_ident(join.table)
+            .push(" ON ");
+            let scope = (join.scope)();
+            sql.push_list(
+                std::iter::once(&join.on).chain(&scope),
+                " AND ",
+                |sql, c| c.write(sql),
+            );
+        }
         let implicit = implicit::<M>(self.trashed, self.scoped, self.all_tenants);
         push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
@@ -341,14 +458,31 @@ impl<M: Model> Select<M> {
     }
 
     fn count_sql(&self) -> Sql {
-        let mut sql = Sql::new();
-        sql.push("SELECT COUNT(*)");
+        let mut sql = self.new_sql();
+        self.write_count_head(&mut sql);
         self.write_from_where(&mut sql);
         sql
     }
 
+    /// `SELECT COUNT(*)`, or `COUNT(DISTINCT pk)` when joins may multiply rows.
+    fn write_count_head(&self, sql: &mut Sql) {
+        if self.multiplies() {
+            sql.push("SELECT COUNT(DISTINCT ");
+            if M::PRIMARY_KEYS.len() > 1 {
+                sql.push("(");
+                Self::write_primary_keys(sql);
+                sql.push(")");
+            } else {
+                Self::write_primary_keys(sql);
+            }
+            sql.push(")");
+        } else {
+            sql.push("SELECT COUNT(*)");
+        }
+    }
+
     fn exists_sql(&self) -> Sql {
-        let mut sql = Sql::new();
+        let mut sql = self.new_sql();
         sql.push("SELECT EXISTS(SELECT 1");
         self.write_from_where(&mut sql);
         sql.push(")");
@@ -490,6 +624,9 @@ impl<M: Model> Select<M> {
     }
 
     fn paginate_sql(&self, page: u64, per_page: u64) -> Sql {
+        if !self.joins.is_empty() {
+            return self.joined_paginate_sql(page, per_page);
+        }
         // `count LEFT JOIN LATERAL (page)` always yields at least one row, so
         // the total is known even when the requested page is empty.
         let mut sql = Sql::new();
@@ -510,6 +647,33 @@ impl<M: Model> Select<M> {
         let offset = (page - 1).saturating_mul(per_page);
         sql.push(&format!(" LIMIT {per_page} OFFSET {offset}) p ON TRUE"));
         self.write_order(&mut sql, "p.");
+        sql
+    }
+
+    /// [`paginate_sql`](Self::paginate_sql) for queries with joins: every
+    /// order key is selected under an alias so the outer query can sort by
+    /// it, and multiplying joins are de-duplicated.
+    fn joined_paginate_sql(&self, page: u64, per_page: u64) -> Sql {
+        let mut sql = self.new_sql();
+        sql.push(r#"SELECT c."__rok_total", p.* FROM ("#);
+        self.write_count_head(&mut sql);
+        sql.push(r#" AS "__rok_total""#);
+        self.write_from_where(&mut sql);
+        sql.push(") c LEFT JOIN LATERAL (");
+        let offset = (page - 1).saturating_mul(per_page);
+        let head = r#"TRUE AS "__rok_present", "#;
+        if self.multiplies() {
+            self.write_distinct_rows(&mut sql, head, Some(per_page), Some(offset));
+        } else {
+            sql.push("SELECT ").push(head);
+            push_columns::<M>(&mut sql);
+            self.write_order_aliases(&mut sql);
+            self.write_from_where(&mut sql);
+            self.write_order(&mut sql, "");
+            sql.push(&format!(" LIMIT {per_page} OFFSET {offset}"));
+        }
+        sql.push(") p ON TRUE");
+        self.write_alias_order(&mut sql, "p.");
         sql
     }
 
@@ -563,6 +727,46 @@ impl<M: Model> Select<M> {
             .await
     }
 
+    /// Every table this query reads: the root and joined tables.
+    pub(crate) fn tables(&self) -> Vec<&'static str> {
+        std::iter::once(M::TABLE)
+            .chain(self.joins.iter().map(|j| j.table))
+            .collect()
+    }
+
+    /// A fresh `SELECT` of `M` restricted to the root rows this (joined)
+    /// query matches: `pk IN (SELECT root.pk FROM … JOIN … WHERE …)`.
+    /// Used for bulk writes through joins.
+    pub(crate) fn key_subselect(&self) -> Select<M> {
+        let inner = self.clone();
+        let render = crate::expr::Render::new(move |sql: &mut Sql| {
+            let previous = std::mem::replace(&mut sql.qualify, true);
+            sql.push("SELECT ");
+            Self::write_primary_keys(sql);
+            inner.write_from_where(sql);
+            sql.qualify = previous;
+        });
+        let kind = if M::PRIMARY_KEYS.len() == 1 {
+            crate::expr::SubKind::In {
+                table: M::TABLE,
+                column: M::PRIMARY_KEY,
+                negated: false,
+            }
+        } else {
+            crate::expr::SubKind::InRow {
+                table: M::TABLE,
+                columns: M::PRIMARY_KEYS,
+            }
+        };
+        Select {
+            filters: vec![Cond::Sub { kind, render }],
+            trashed: self.trashed,
+            scoped: self.scoped,
+            all_tenants: self.all_tenants,
+            ..Select::new()
+        }
+    }
+
     /// The ordering used for keyset pagination: the query's `ORDER BY`
     /// columns plus the primary key as a tiebreaker.
     fn keyset_order(&self) -> Vec<(&'static str, Direction)> {
@@ -571,8 +775,10 @@ impl<M: Model> Select<M> {
             .iter()
             .filter_map(|o| o.column().map(|c| (c, o.direction)))
             .collect();
-        if !order.iter().any(|(c, _)| *c == M::PRIMARY_KEY) {
-            order.push((M::PRIMARY_KEY, Direction::Asc));
+        for key in M::PRIMARY_KEYS {
+            if !order.iter().any(|(c, _)| c == key) {
+                order.push((key, Direction::Asc));
+            }
         }
         order
     }
@@ -583,7 +789,9 @@ impl<M: Model> Select<M> {
     /// doesn't grow with the page number and rows aren't skipped or repeated
     /// when data changes between requests.
     ///
-    /// Ordering columns must be `NOT NULL`. Pass `None` for the first page,
+    /// Sort keys (columns or expressions) must be `NOT NULL`; expression
+    /// orders and joined queries paginate over a wrapped subquery. Pass
+    /// `None` for the first page,
     /// then `page.next` for the following ones:
     ///
     /// ```ignore
@@ -606,6 +814,9 @@ impl<M: Model> Select<M> {
         if limit == 0 {
             return Err(Error::InvalidQuery("`limit` must be greater than 0".into()));
         }
+        if self.needs_wrapped_keyset() {
+            return self.wrapped_cursor_paginate(executor, after, limit).await;
+        }
         let select = self.cursor_select(after, limit)?;
         let order = select.keyset_order();
         let mut items = select.all(executor).await?;
@@ -627,12 +838,141 @@ impl<M: Model> Select<M> {
         Ok(CursorPage { items, next })
     }
 
-    fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
-        if self.order.iter().any(|o| o.column().is_none()) {
+    /// Joined queries and expression orders paginate over aliased sort keys.
+    fn needs_wrapped_keyset(&self) -> bool {
+        !self.joins.is_empty() || self.order.iter().any(|o| o.column().is_none())
+    }
+
+    /// The order with the root primary key appended as a tiebreaker.
+    fn keyset_orders(&self) -> Vec<Order<M>> {
+        let mut order = self.order.clone();
+        for key in M::PRIMARY_KEYS {
+            let present = order.iter().any(|o| {
+                matches!(o.target, crate::expr::OrderTarget::Column { table, name } if table == M::TABLE && name == *key)
+            });
+            if !present {
+                order.push(Column::<M>::new(key).asc());
+            }
+        }
+        order
+    }
+
+    /// ```sql
+    /// SELECT * FROM (
+    ///     SELECT [DISTINCT ON (pk)] <columns>, <sort keys> AS __rok_o{i} FROM … WHERE …
+    /// ) k WHERE (k.__rok_o0 > $ OR (k.__rok_o0 = $ AND k.__rok_o1 > $) …)
+    /// ORDER BY k.__rok_o0, … LIMIT n + 1
+    /// ```
+    fn wrapped_cursor_sql(&self, after: Option<&Cursor>, limit: u64) -> Result<(Sql, usize)> {
+        const ALIASES: [&str; 16] = [
+            "__rok_o0",
+            "__rok_o1",
+            "__rok_o2",
+            "__rok_o3",
+            "__rok_o4",
+            "__rok_o5",
+            "__rok_o6",
+            "__rok_o7",
+            "__rok_o8",
+            "__rok_o9",
+            "__rok_o10",
+            "__rok_o11",
+            "__rok_o12",
+            "__rok_o13",
+            "__rok_o14",
+            "__rok_o15",
+        ];
+        let mut keyed = self.clone();
+        keyed.order = self.keyset_orders();
+        let n = keyed.order.len();
+        if n > ALIASES.len() {
             return Err(Error::InvalidQuery(
-                "keyset pagination can only order by columns, not expressions".into(),
+                "too many sort keys for keyset pagination".into(),
             ));
         }
+        let mut sql = keyed.new_sql();
+        sql.qualify = true;
+        sql.push("SELECT * FROM (SELECT ");
+        let multiplies = keyed.multiplies();
+        if multiplies {
+            sql.push("DISTINCT ON (");
+            Self::write_primary_keys(&mut sql);
+            sql.push(") ");
+        }
+        push_columns::<M>(&mut sql);
+        keyed.write_order_aliases(&mut sql);
+        keyed.write_from_where(&mut sql);
+        if multiplies {
+            sql.push(" ORDER BY ");
+            Self::write_primary_keys(&mut sql);
+            for o in &keyed.order {
+                sql.push(", ");
+                o.write(&mut sql);
+            }
+        }
+        sql.push(r#") "__rok_k""#);
+        let key = |i: usize| crate::expr::Term::Column {
+            table: "__rok_k",
+            name: ALIASES[i],
+        };
+        if let Some(cursor) = after {
+            if cursor.values.len() != n {
+                return Err(Error::InvalidCursor(format!(
+                    "expected {n} values, got {}",
+                    cursor.values.len()
+                )));
+            }
+            let cmp = |i: usize, op: &'static str| Cond::Cmp {
+                term: key(i),
+                op,
+                value: cursor.values[i].clone(),
+            };
+            let branches = (0..n)
+                .map(|i| {
+                    let step = match keyed.order[i].direction {
+                        crate::expr::Direction::Asc => cmp(i, ">"),
+                        crate::expr::Direction::Desc => cmp(i, "<"),
+                    };
+                    Cond::And((0..i).map(|j| cmp(j, "=")).chain([step]).collect())
+                })
+                .collect();
+            sql.push(" WHERE ");
+            Cond::Or(branches).write(&mut sql);
+        }
+        sql.push(" ORDER BY ").push_list(0..n, ", ", |sql, i| {
+            key(i).write(sql);
+            keyed.order[i].write_direction(sql);
+        });
+        sql.push(&format!(" LIMIT {}", limit + 1));
+        Ok((sql, n))
+    }
+
+    async fn wrapped_cursor_paginate<'e, E: Executor<'e>>(
+        self,
+        executor: E,
+        after: Option<&Cursor>,
+        limit: u64,
+    ) -> Result<CursorPage<M>> {
+        let (sql, n) = self.wrapped_cursor_sql(after, limit)?;
+        let rows = exec::fetch_rows(executor, &sql, &[], self.use_replica()).await?;
+        let more = rows.len() as u64 > limit;
+        let kept = &rows[..rows.len().min(limit as usize)];
+        let items = kept
+            .iter()
+            .map(M::from_row)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let next = match kept.last() {
+            Some(last) if more => Some(Cursor::new(
+                (0..n)
+                    .map(|i| Value::from_row_column(last, &format!("__rok_o{i}")))
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            _ => None,
+        };
+        Ok(CursorPage { items, next })
+    }
+
+    fn cursor_select(self, after: Option<&Cursor>, limit: u64) -> Result<Self> {
         let order = self.keyset_order();
         let mut select = self;
         select.order = order
@@ -683,6 +1023,7 @@ impl<M> Clone for Select<M> {
             scoped: self.scoped,
             primary: self.primary,
             all_tenants: self.all_tenants,
+            joins: self.joins.clone(),
             _model: PhantomData,
         }
     }
@@ -697,14 +1038,14 @@ impl<M: Model> fmt::Debug for Select<M> {
 /// A `SELECT` of specific columns or aggregates, created with
 /// [`Select::select`]. Decode rows into tuples or any `sqlx::FromRow` type.
 pub struct Projected<M> {
-    select: Select<M>,
-    items: Vec<Projection<M>>,
+    pub(crate) select: Select<M>,
+    pub(crate) items: Vec<Projection<M>>,
 }
 
 impl<M: Model> Projected<M> {
     /// Render the `SELECT` statement.
     pub fn to_sql(&self) -> Sql {
-        let mut sql = Sql::new();
+        let mut sql = self.select.new_sql();
         self.write_into(&mut sql);
         sql
     }
@@ -814,9 +1155,9 @@ impl<M: Model + Clone> Memoized<M> {
             tracing::debug!(target: "rok_db::cache", table = M::TABLE, op, "cache hit");
             return Ok(hit);
         }
-        let generation = cache.generation(M::TABLE);
+        let stamp = cache.stamp(&self.select.tables());
         let value = run(executor).await?;
-        cache.put(key, M::TABLE, generation, self.ttl, value.clone());
+        cache.put(key, stamp, self.ttl, value.clone());
         Ok(value)
     }
 
@@ -1161,7 +1502,7 @@ impl Conflict {
                 .copied()
                 .filter(|c| {
                     !target_columns.contains(c)
-                        && *c != M::PRIMARY_KEY
+                        && !M::PRIMARY_KEYS.contains(c)
                         && M::CREATED_AT_COLUMN != Some(*c)
                 })
                 .collect(),
@@ -1495,5 +1836,8 @@ pub fn __cursor_sql<M: Model>(
     after: Option<&Cursor>,
     limit: u64,
 ) -> Result<Sql> {
+    if select.needs_wrapped_keyset() {
+        return Ok(select.wrapped_cursor_sql(after, limit)?.0);
+    }
     Ok(select.cursor_select(after, limit)?.to_sql())
 }
