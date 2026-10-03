@@ -44,6 +44,8 @@ use syn::{Data, DeriveInput, Fields, Ident, LitStr, Path, parse_macro_input, spa
 /// - `#[rok(created_at)]` / `#[rok(updated_at)]` — managed timestamp column
 ///   with a custom name (see `timestamps`).
 /// - `#[rok(deleted_at)]` — soft-delete column with a custom name.
+/// - `#[rok(tenant)]` — the tenant column for row-level multi-tenancy
+///   (see `rok_db::tenant`).
 /// - `#[rok(version)]` — optimistic-locking counter (an integer): every
 ///   update increments it, and `save`/`delete` fail with a conflict error if
 ///   it changed since the record was loaded.
@@ -87,6 +89,7 @@ struct Field {
     updated_at: bool,
     deleted_at: bool,
     version: bool,
+    tenant: bool,
     belongs_to: Option<(Ident, Path)>,
     rules: Vec<Rule>,
 }
@@ -284,6 +287,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let updated_at = find_ts(|f| f.updated_at, "updated_at", timestamps, "timestamps")?;
     let deleted_at = find_ts(|f| f.deleted_at, "deleted_at", soft_delete, "soft_delete")?;
     let version = find_ts(|f| f.version, "version", false, "")?;
+    let tenant = find_ts(|f| f.tenant, "tenant", false, "")?;
     let opt = |v: Option<String>| match v {
         Some(c) => quote!(::core::option::Option::Some(#c)),
         None => quote!(::core::option::Option::None),
@@ -292,6 +296,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
     let updated_at = opt(updated_at);
     let deleted_at = opt(deleted_at);
     let version = opt(version);
+    let tenant = opt(tenant);
 
     let value_arms = columns.iter().map(|f| {
         let ident = &f.ident;
@@ -448,6 +453,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             const UPDATED_AT_COLUMN: ::core::option::Option<&'static str> = #updated_at;
             const DELETED_AT_COLUMN: ::core::option::Option<&'static str> = #deleted_at;
             const VERSION_COLUMN: ::core::option::Option<&'static str> = #version;
+            const TENANT_COLUMN: ::core::option::Option<&'static str> = #tenant;
 
             fn primary_key(&self) -> #krate::Value {
                 #krate::Value::from(&self.#pk_ident)
@@ -502,6 +508,7 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
             updated_at: false,
             deleted_at: false,
             version: false,
+            tenant: false,
             belongs_to: None,
             rules: Vec::new(),
         };
@@ -521,6 +528,8 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
                     f.deleted_at = true;
                 } else if meta.path.is_ident("version") {
                     f.version = true;
+                } else if meta.path.is_ident("tenant") {
+                    f.tenant = true;
                 } else if meta.path.is_ident("validate") {
                     parse_rules(&meta, &mut f.rules)?;
                 } else if meta.path.is_ident("belongs_to") {
@@ -547,13 +556,13 @@ fn parse_fields(input: &DeriveInput, derive: &str) -> syn::Result<Vec<Field>> {
                     f.column = meta.value()?.parse::<LitStr>()?.value();
                 } else {
                     return Err(meta.error(
-                        "unknown `rok` attribute; expected `primary_key`, `generated`, `column`, `skip`, `created_at`, `updated_at`, `deleted_at`, `version`, `validate` or `belongs_to`",
+                        "unknown `rok` attribute; expected `primary_key`, `generated`, `column`, `skip`, `created_at`, `updated_at`, `deleted_at`, `version`, `tenant`, `validate` or `belongs_to`",
                     ));
                 }
                 Ok(())
             })?;
         }
-        let managed = f.created_at || f.updated_at || f.deleted_at || f.version;
+        let managed = f.created_at || f.updated_at || f.deleted_at || f.version || f.tenant;
         if f.skip
             && (f.primary_key
                 || f.generated
@@ -650,6 +659,7 @@ fn expand_from_row(input: DeriveInput) -> syn::Result<TokenStream2> {
             || f.updated_at
             || f.deleted_at
             || f.version
+            || f.tenant
             || f.belongs_to.is_some()
             || !f.rules.is_empty()
     }) {

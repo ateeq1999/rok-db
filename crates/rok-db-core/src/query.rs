@@ -45,11 +45,32 @@ impl Trashed {
     }
 }
 
-/// Implicit conditions: the soft-delete scope and, unless `unscoped`, the
-/// model's default scope.
-fn implicit<M: Model>(trashed: Trashed, scoped: bool) -> Vec<Cond> {
+/// Implicit conditions: the tenant, the soft-delete scope and, unless
+/// `unscoped`, the model's default scope.
+fn implicit<M: Model>(trashed: Trashed, scoped: bool, all_tenants: bool) -> Vec<Cond> {
     let default = scoped.then(M::default_scope).flatten().map(|e| e.cond);
-    trashed.cond::<M>().into_iter().chain(default).collect()
+    tenant_cond::<M>(all_tenants)
+        .into_iter()
+        .chain(trashed.cond::<M>())
+        .chain(default)
+        .collect()
+}
+
+/// `tenant = current` inside a tenant scope; `FALSE` outside one (fail
+/// closed) unless `all_tenants`.
+fn tenant_cond<M: Model>(all_tenants: bool) -> Option<Cond> {
+    let column = M::TENANT_COLUMN.filter(|_| !all_tenants)?;
+    Some(match crate::tenant::current() {
+        Some(tenant) => Column::<M>::new(column).eq(tenant).cond,
+        None => {
+            tracing::warn!(
+                target: "rok_db::tenant",
+                table = M::TABLE,
+                "query on a tenant model outside `with_tenant`; matching no rows (use `all_tenants()` to opt out)"
+            );
+            Expr::<M>::none().cond
+        }
+    })
 }
 
 /// Lock mode appended to a `SELECT`.
@@ -74,6 +95,7 @@ pub struct Select<M> {
     trashed: Trashed,
     scoped: bool,
     primary: bool,
+    all_tenants: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -97,6 +119,7 @@ impl<M: Model> Select<M> {
             trashed: Trashed::Exclude,
             scoped: true,
             primary: false,
+            all_tenants: false,
             _model: PhantomData,
         }
     }
@@ -104,6 +127,13 @@ impl<M: Model> Select<M> {
     /// Add a `WHERE` condition. Multiple calls are combined with `AND`.
     pub fn filter(mut self, expr: Expr<M>) -> Self {
         self.filters.push(expr.cond);
+        self
+    }
+
+    /// Query every tenant's rows of a `#[rok(tenant)]` model, ignoring the
+    /// current tenant scope (for admin tools and background jobs).
+    pub fn all_tenants(mut self) -> Self {
+        self.all_tenants = true;
         self
     }
 
@@ -247,6 +277,7 @@ impl<M: Model> Select<M> {
             sets: Vec::new(),
             trashed: self.trashed,
             scoped: self.scoped,
+            all_tenants: self.all_tenants,
             _model: PhantomData,
         }
     }
@@ -286,7 +317,7 @@ impl<M: Model> Select<M> {
 
     fn write_from_where(&self, sql: &mut Sql) {
         sql.push(" FROM ").push_ident(M::TABLE);
-        let implicit = implicit::<M>(self.trashed, self.scoped);
+        let implicit = implicit::<M>(self.trashed, self.scoped, self.all_tenants);
         push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
@@ -651,6 +682,7 @@ impl<M> Clone for Select<M> {
             trashed: self.trashed,
             scoped: self.scoped,
             primary: self.primary,
+            all_tenants: self.all_tenants,
             _model: PhantomData,
         }
     }
@@ -880,6 +912,7 @@ pub struct Update<M> {
     sets: Vec<(&'static str, Assign)>,
     trashed: Trashed,
     scoped: bool,
+    all_tenants: bool,
     _model: PhantomData<fn() -> M>,
 }
 
@@ -896,8 +929,15 @@ impl<M: Model> Update<M> {
             sets: Vec::new(),
             trashed: Trashed::Exclude,
             scoped: true,
+            all_tenants: false,
             _model: PhantomData,
         }
+    }
+
+    /// Update every tenant's rows, ignoring the current tenant scope.
+    pub fn all_tenants(mut self) -> Self {
+        self.all_tenants = true;
+        self
     }
 
     /// Ignore the model's default scope.
@@ -962,6 +1002,7 @@ impl<M: Model> Update<M> {
             filters: self.filters,
             trashed: self.trashed,
             scoped: self.scoped,
+            all_tenants: self.all_tenants,
             ..Select::new()
         }
     }
@@ -1000,11 +1041,18 @@ impl<M: Model> Update<M> {
                     .push(" + 1");
             }
         }
-        let implicit = implicit::<M>(self.trashed, self.scoped);
+        let implicit = implicit::<M>(self.trashed, self.scoped, self.all_tenants);
         push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
     fn check(&self) -> Result<()> {
+        if let Some(tenant) = M::TENANT_COLUMN {
+            if self.is_set(tenant) && crate::tenant::current().is_some() {
+                return Err(Error::InvalidQuery(format!(
+                    "can't change the tenant column `{tenant}` inside a tenant scope"
+                )));
+            }
+        }
         if self.sets.is_empty() {
             return Err(Error::InvalidQuery(format!(
                 "UPDATE on `{}` has no columns to set",
@@ -1042,6 +1090,7 @@ impl<M> Clone for Update<M> {
             sets: self.sets.clone(),
             trashed: self.trashed,
             scoped: self.scoped,
+            all_tenants: self.all_tenants,
             _model: PhantomData,
         }
     }
@@ -1122,8 +1171,13 @@ impl Conflict {
                 "ON CONFLICT DO UPDATE needs conflict columns or a constraint".into(),
             ));
         }
-        // Managed columns are maintained, never copied from the new row.
-        updates.retain(|c| M::VERSION_COLUMN != Some(*c) && M::UPDATED_AT_COLUMN != Some(*c));
+        // Managed columns are maintained, never copied from the new row; the
+        // tenant of an existing row never changes.
+        updates.retain(|c| {
+            M::VERSION_COLUMN != Some(*c)
+                && M::UPDATED_AT_COLUMN != Some(*c)
+                && M::TENANT_COLUMN != Some(*c)
+        });
         sql.push(" DO UPDATE SET ");
         let mut first = true;
         let mut sep = |sql: &mut Sql| {
@@ -1157,6 +1211,18 @@ impl Conflict {
                 .push_ident(M::TABLE)
                 .push(".")
                 .push_ident(M::PRIMARY_KEY);
+        }
+        // Never update another tenant's row: the conflicting row must belong
+        // to the tenant being written (no row is returned otherwise).
+        if let Some(tenant) = M::TENANT_COLUMN {
+            if inserted.contains(&tenant) {
+                sql.push(" WHERE ")
+                    .push_ident(M::TABLE)
+                    .push(".")
+                    .push_ident(tenant)
+                    .push(" = EXCLUDED.")
+                    .push_ident(tenant);
+            }
         }
         Ok(())
     }
@@ -1270,6 +1336,12 @@ impl<M: Model> Insert<M> {
 
     fn build(&self, strict: bool) -> Result<Sql> {
         let mut values = self.values.clone();
+        if let Some(column) = M::TENANT_COLUMN {
+            if let Some(tenant) = crate::model::tenant_override::<M>(column) {
+                values.retain(|(c, _, _)| *c != column);
+                values.push((column, "?".into(), vec![tenant]));
+            }
+        }
         for ts in [M::CREATED_AT_COLUMN, M::UPDATED_AT_COLUMN]
             .into_iter()
             .flatten()

@@ -101,6 +101,9 @@
 //!   [`Db::primary`].
 //! - **LISTEN/NOTIFY**: [`Db::listen`], [`Db::notify`] and model change
 //!   feeds ([`Model::changes`], see [`notify`]).
+//! - **Multi-instance caching**: [`DbBuilder::shared_cache_invalidation`].
+//! - **Multi-tenancy**: `#[rok(tenant)]` and [`tenant::with_tenant`].
+//! - **Audit log** (feature `json`): the [`audit`] module.
 //! - **Memoization**: [`Select::memoize`] caches results in the pool's
 //!   [`QueryCache`] with automatic invalidation on writes.
 //! - **Query logging**: every statement is logged through `tracing`

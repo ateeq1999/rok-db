@@ -3,7 +3,10 @@
 //! Most users should depend on the `rok-db` crate, which re-exports
 //! everything here together with the `#[derive(Model)]` macro.
 
+#[cfg(feature = "json")]
+pub mod audit;
 mod cache;
+mod cache_sync;
 mod context;
 mod copy;
 mod cursor;
@@ -19,6 +22,7 @@ mod query;
 mod raw;
 pub mod relation;
 mod sql;
+pub mod tenant;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod tracked;

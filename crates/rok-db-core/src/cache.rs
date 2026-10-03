@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 /// An in-memory cache for memoized query results.
@@ -33,7 +33,10 @@ pub struct QueryCache {
     inner: Arc<Mutex<Inner>>,
 }
 
-struct Inner {
+pub(crate) struct Inner {
+    /// Publishes local invalidations to other instances (see
+    /// [`DbBuilder::shared_cache_invalidation`](crate::DbBuilder::shared_cache_invalidation)).
+    broadcast: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     capacity: usize,
     entries: HashMap<String, Entry>,
     generations: HashMap<String, u64>,
@@ -64,6 +67,7 @@ impl QueryCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
+                broadcast: None,
                 capacity: capacity.max(1),
                 entries: HashMap::new(),
                 generations: HashMap::new(),
@@ -78,22 +82,62 @@ impl QueryCache {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Drop every cached result read from `table`.
+    /// Drop every cached result read from `table` (on every instance, when
+    /// shared invalidation is enabled).
     pub fn invalidate(&self, table: &str) {
         let mut inner = self.lock();
-        *inner.generations.entry(table.to_owned()).or_default() += 1;
-        inner.entries.retain(|_, e| e.table != table);
+        inner.invalidate(table);
+        if let Some(tx) = &inner.broadcast {
+            let _ = tx.send(table.to_owned());
+        }
     }
 
-    /// Drop every cached result.
+    /// Drop every cached result (on every instance, when shared
+    /// invalidation is enabled).
     pub fn clear(&self) {
         let mut inner = self.lock();
+        if let Some(tx) = &inner.broadcast {
+            let _ = tx.send(String::new());
+        }
+        inner.clear();
+    }
+
+    pub(crate) fn downgrade(&self) -> Weak<Mutex<Inner>> {
+        Arc::downgrade(&self.inner)
+    }
+
+    /// Route future invalidations to `tx` as well.
+    pub(crate) fn set_broadcast(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        self.lock().broadcast = Some(tx);
+    }
+}
+
+/// Apply an invalidation received from another instance (`""` = clear all).
+pub(crate) fn apply_remote(inner: &Mutex<Inner>, table: &str) {
+    let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+    if table.is_empty() {
+        inner.clear();
+    } else {
+        inner.invalidate(table);
+    }
+}
+
+impl Inner {
+    fn invalidate(&mut self, table: &str) {
+        *self.generations.entry(table.to_owned()).or_default() += 1;
+        self.entries.retain(|_, e| e.table != table);
+    }
+
+    fn clear(&mut self) {
+        let inner = self;
         // Bumping the global generation (keyed by "") also rejects results
         // that were computed before this call but stored after it.
         *inner.generations.entry(String::new()).or_default() += 1;
         inner.entries.clear();
     }
+}
 
+impl QueryCache {
     /// Hit/miss counters and the current size.
     pub fn stats(&self) -> CacheStats {
         let inner = self.lock();

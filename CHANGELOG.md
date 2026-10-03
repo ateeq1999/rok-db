@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shared cache invalidation: `DbBuilder::shared_cache_invalidation`
+  broadcasts query-cache invalidations between processes over
+  `LISTEN`/`NOTIFY` (clearing the local cache after reconnects).
+- Multi-tenancy: `#[rok(tenant)]`, `tenant::with_tenant` / `tenant::current`
+  (task-local), fail-closed filtering of queries, bulk writes and record
+  operations, tenant stamping of inserts/upserts/COPY, protection against
+  cross-tenant upserts and moves, and `Select::all_tenants` /
+  `Update::all_tenants`.
+- Audit log (feature `json`): `audit::install`, `audit::enable` (with
+  excluded columns), `audit::disable`, `audit::history`, the `AuditEntry`
+  model, `audit::with_actor` and `Tx::set_actor`.
+
 - PostgreSQL arrays: `Vec<T>` column values (text, bool, integers,
   floats, and uuid/date types with their features) and the operators
   `array_has`, `array_contains`, `array_overlaps` and `eq_any`.
@@ -113,6 +125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Open source project files: dual MIT/Apache-2.0 license, contributing guide,
   governance, security policy, Code of Conduct, RFC process, issue and pull
   request templates, CI, Dependabot and cargo-deny configuration.
+
+### Fixed
+
+- `insert`, `upsert`, `upsert_on` and `delete` render their SQL when
+  awaited, not when the future is created, so scopes such as
+  `with_tenant` apply to futures created outside them.
 
 ### Changed
 

@@ -98,6 +98,8 @@ async fn run<M: Model>(
         buf.extend_from_slice(&field_count.to_be_bytes());
         let values = record.values();
         for (column, value) in values.iter().filter(|(c, _)| columns.contains(c)) {
+            let tenant = crate::model::tenant_override::<M>(column);
+            let value = tenant.as_ref().unwrap_or(value);
             match value.encode_binary() {
                 Ok(Some(bytes)) => {
                     let len = i32::try_from(bytes.len()).map_err(|_| {

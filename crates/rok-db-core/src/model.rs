@@ -99,6 +99,8 @@ pub trait Model:
     /// Soft-delete column: `delete` sets it to `now()` and queries skip rows
     /// where it isn't `NULL`.
     const DELETED_AT_COLUMN: Option<&'static str> = None;
+    /// Tenant column: see [`tenant`](crate::tenant).
+    const TENANT_COLUMN: Option<&'static str> = None;
     /// Optimistic-locking column: incremented on every update, and `save`/
     /// `delete` fail with [`Error::Conflict`] if it changed since loading.
     const VERSION_COLUMN: Option<&'static str> = None;
@@ -311,10 +313,10 @@ pub trait Model:
     where
         E: Executor<'e>,
     {
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
         async move {
-            pre?;
+            // Rendered when awaited, so tenant scopes apply.
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), false, None);
             let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
@@ -369,10 +371,9 @@ pub trait Model:
             target: ConflictTarget::Columns(vec![Self::PRIMARY_KEY]),
             action: ConflictAction::UpdateAll,
         };
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
         async move {
-            pre?;
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), true, Some(&conflict));
             let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
@@ -403,10 +404,9 @@ pub trait Model:
             target: ConflictTarget::Columns(columns.into_iter().map(|c| c.name()).collect()),
             action: ConflictAction::UpdateAll,
         };
-        let pre = pre_insert(self);
-        let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
         async move {
-            pre?;
+            pre_insert(self)?;
+            let sql = insert_sql::<Self>(std::slice::from_ref(self), false, Some(&conflict));
             let row = exec::fetch_optional::<Self, _>(executor, &sql?, &[Self::TABLE], false)
                 .await?
                 .ok_or_else(|| Error::not_found::<Self>(None))?;
@@ -451,7 +451,10 @@ pub trait Model:
         let pk = self.primary_key();
         let key = pk.to_string();
         let managed = |c: &str| {
-            c == Self::PRIMARY_KEY || is_timestamp::<Self>(c) || Self::VERSION_COLUMN == Some(c)
+            c == Self::PRIMARY_KEY
+                || is_timestamp::<Self>(c)
+                || Self::VERSION_COLUMN == Some(c)
+                || Self::TENANT_COLUMN == Some(c)
         };
         let sets: Vec<_> = writable::<Self>(self.values())
             .filter(|(c, _)| !managed(c))
@@ -542,23 +545,24 @@ pub trait Model:
         if let Some((column, current)) = version.clone() {
             select = select.filter(Column::new(column).eq(current));
         }
-        let mut sql = Sql::new();
-        match soft {
-            Some(deleted_at) => select
-                .update()
-                .set_raw(Column::new(deleted_at), "now()", [] as [Value; 0])
-                .write_into(&mut sql),
-            None => {
-                let delete = if force {
-                    select.force_delete_sql()
-                } else {
-                    select.delete_sql()
-                };
-                sql = delete;
-            }
-        }
         async move {
             pre?;
+            // Rendered when awaited, so tenant scopes apply.
+            let mut sql = Sql::new();
+            match soft {
+                Some(deleted_at) => select
+                    .update()
+                    .set_raw(Column::new(deleted_at), "now()", [] as [Value; 0])
+                    .write_into(&mut sql),
+                None => {
+                    let delete = if force {
+                        select.force_delete_sql()
+                    } else {
+                        select.delete_sql()
+                    };
+                    sql = delete;
+                }
+            }
             if version.is_some() {
                 checked_write::<Self, _>(executor, sql, pk, exists).await?;
             } else if exec::execute(executor, &sql, &[Self::TABLE]).await? == 0 {
@@ -679,12 +683,15 @@ pub(crate) fn insert_sql<M: Model>(
                 sql.push_ident(c);
             })
             .push(") VALUES ");
+        let tenant = M::TENANT_COLUMN.zip(crate::tenant::current());
         sql.push_list(records, ", ", |sql, record| {
             let values = record.values().into_iter().filter(|(c, _)| include(c));
             sql.push("(")
                 .push_list(values, ", ", |sql, (c, v)| {
                     if is_timestamp::<M>(c) {
                         sql.push("now()");
+                    } else if let Some((_, current)) = tenant.as_ref().filter(|(t, _)| *t == c) {
+                        sql.bind(current.clone());
                     } else {
                         sql.bind(v);
                     }
@@ -697,6 +704,14 @@ pub(crate) fn insert_sql<M: Model>(
     }
     push_returning::<M>(&mut sql);
     Ok(sql)
+}
+
+/// The tenant value to write for `column` of `M`, if it is the tenant column
+/// and a tenant scope is active.
+pub(crate) fn tenant_override<M: Model>(column: &str) -> Option<Value> {
+    M::TENANT_COLUMN
+        .filter(|c| *c == column)
+        .and_then(|_| crate::tenant::current())
 }
 
 pub(crate) fn push_columns<M: Model>(sql: &mut Sql) {

@@ -113,6 +113,7 @@ Every column gets a constant named after its field: `Post::SLUG`, `Post::AUTHOR`
 | `skip` | field | not a column |
 | `created_at` / `updated_at` / `deleted_at` | field | managed column with a custom name |
 | `version` | field | optimistic-locking counter |
+| `tenant` | field | tenant column for row-level multi-tenancy |
 | `validate(length(..), range(..), email, non_empty, custom = f)` | field | validation rules |
 | `belongs_to = User` | field | `user_id` → `Post::USER`, `post.user()` (or `belongs_to(author = User)`) |
 
@@ -264,6 +265,11 @@ db.cache().unwrap().stats();        // hits, misses, entries
 - Writes rok-db can't see (other services, raw SQL, cascades and triggers on other tables) need `raw(..).invalidates("users")`,
   `cache.invalidate("users")`, or a short TTL.
 - Without a configured cache (or with a plain sqlx pool), `memoize` simply runs the query.
+
+Running several app servers? Add `.shared_cache_invalidation()` to the builder: every instance
+broadcasts its invalidations over PostgreSQL `NOTIFY` and drops stale entries from the others,
+with no extra infrastructure. (If a listener reconnects, its local cache is cleared, since
+messages may have been missed.)
 
 ### Query logging
 
@@ -553,6 +559,48 @@ while let Ok(change) = changes.recv().await {
 
 Notifications arrive on commit, at most once, and only to connected listeners: great for cache
 busting, websockets and waking workers, not a durable event log.
+
+### Multi-tenancy
+
+```rust
+#[derive(Model)]
+struct Invoice { id: i64, #[rok(tenant)] org_id: i64, total: i64 }
+
+rok_db::tenant::with_tenant(org.id, async {
+    Invoice::all(&db).await?;                 // … WHERE org_id = $1
+    invoice.insert(&db).await?;               // org_id is always the current tenant
+    Ok::<_, rok_db::Error>(())
+}).await?;
+
+Invoice::all(&db).await?;                     // outside a scope: matches nothing (fails closed)
+Invoice::query().all_tenants().all(&db).await?; // explicit opt-out for admin jobs
+```
+
+Every query, count, bulk update/delete and record operation is restricted to the current tenant;
+upserts can't take over another tenant's row and saves can't move a row to another tenant. The
+scope is task-local (`tokio::spawn`ed tasks need their own `with_tenant`), and raw SQL is not
+filtered.
+
+### Audit log
+
+```rust
+use rok_db::audit;
+
+audit::install(&db).await?;                                   // table + trigger function, once
+audit::enable::<User>(&db, &[User::PASSWORD_HASH]).await?;    // audit `users`, minus secrets
+
+audit::with_actor("user:42", async {                          // or tx.set_actor("user:42")
+    db.transaction(|tx| Box::pin(async move { user.save(&mut *tx).await })).await
+}).await?;
+
+for entry in audit::history::<User>(&db, user.id).await? {
+    println!("{} by {:?}: {:?}", entry.op, entry.actor, entry.changed);
+}
+```
+
+Trigger-based (feature `json`): it records every insert, update and delete of the table, including bulk
+and raw SQL, with old/new rows as JSONB and the changed columns. No-op updates are skipped.
+`AuditEntry` is a regular model you can query.
 
 ### Retrying transactions
 

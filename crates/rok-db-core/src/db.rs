@@ -104,11 +104,17 @@ impl Db {
     /// Start a transaction. It is rolled back on drop unless
     /// [`Tx::commit`] is called.
     pub async fn begin(&self) -> Result<Tx> {
-        Ok(Tx {
+        #[cfg_attr(not(feature = "json"), allow(unused_mut))]
+        let mut tx = Tx {
             inner: self.pool.begin().await?,
             ctx: Some(self.ctx.clone()),
             touched: Mutex::default(),
-        })
+        };
+        #[cfg(feature = "json")]
+        if let Some(actor) = crate::audit::current_actor() {
+            tx.set_actor(&actor).await?;
+        }
+        Ok(tx)
     }
 
     /// Run `f` inside a transaction, committing if it returns `Ok` and
@@ -385,6 +391,7 @@ pub struct DbBuilder {
     options: PgPoolOptions,
     ctx: Context,
     replica_urls: Vec<String>,
+    shared_invalidation: bool,
 }
 
 impl DbBuilder {
@@ -422,6 +429,20 @@ impl DbBuilder {
         self
     }
 
+    /// Keep the query caches of every process using this database coherent:
+    /// invalidations are broadcast with PostgreSQL `NOTIFY` and applied by
+    /// all instances that enabled this (needs [`query_cache`](Self::query_cache)
+    /// and a Tokio runtime). A background task holds one extra connection.
+    ///
+    /// Invalidation is asynchronous: other instances drop stale entries a few
+    /// milliseconds after the writing transaction's statement. After a lost
+    /// connection the local cache is cleared, since messages may have been
+    /// missed.
+    pub fn shared_cache_invalidation(mut self) -> Self {
+        self.shared_invalidation = true;
+        self
+    }
+
     /// Log queries slower than `threshold` at `WARN` level on the
     /// `rok_db::slow_query` tracing target (default 1s, `Duration::ZERO`
     /// disables it).
@@ -431,6 +452,14 @@ impl DbBuilder {
     }
 
     fn build(self, pool: PgPool) -> Db {
+        if self.shared_invalidation {
+            match &self.ctx.cache {
+                Some(cache) => crate::cache_sync::start(pool.clone(), cache),
+                None => {
+                    tracing::warn!(target: "rok_db::cache", "shared_cache_invalidation() without query_cache(); ignored")
+                }
+            }
+        }
         Db {
             pool,
             ctx: Arc::new(self.ctx),
@@ -543,6 +572,16 @@ impl Tx {
     /// Roll the transaction back.
     pub async fn rollback(self) -> Result<()> {
         Ok(self.inner.rollback().await?)
+    }
+
+    /// Record `actor` as the author of this transaction's changes in the
+    /// audit log (`SET LOCAL rok.actor`, see [`audit`](crate::audit)).
+    pub async fn set_actor(&mut self, actor: &str) -> Result<()> {
+        sqlx::query("SELECT set_config('rok.actor', $1, true)")
+            .bind(actor)
+            .execute(&mut *self.inner)
+            .await?;
+        Ok(())
     }
 
     /// The underlying sqlx transaction.
