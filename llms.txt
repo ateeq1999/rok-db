@@ -1,0 +1,120 @@
+# rok-db
+
+> A type-safe async ORM for PostgreSQL built on sqlx: `#[derive(Model)]` structs, typed column
+> constants, composable query builders, typed joins, relations, pagination, caching,
+> multi-tenancy and more. Every value is bound as a parameter; every identifier is quoted.
+
+This file is a dense digest for coding agents. Read `AGENTS.md` for the task skills, the
+README for examples and `docs/rfcs/` for designs. Crates: `rok-db` (facade, the only public
+API), `rok-db-core` (runtime), `rok-db-macros` (derive). MSRV 1.85. License: MIT OR
+Apache-2.0. Current release: 0.3.1 on crates.io (`rok-db = "0.3"`); everything below is
+released.
+
+## Setup
+
+- `use rok_db::prelude::*;` (Column, Db, DbEnum, DbNewtype, Executor, Expr, Model, Page,
+  Projection, Select, Tx, stream extension traits).
+- `Db::connect(url)`, `Db::connect_env()` (DATABASE_URL), `Db::builder()` with
+  `max_connections`, `acquire_timeout`, `query_cache(capacity)`, `slow_query_threshold`,
+  `read_replica(url)`, `shared_cache_invalidation()`, then `.connect(url)`.
+- Features: `chrono`, `uuid`, `json`, `migrate` (`db.migrate("./migrations")`), `testing`
+  (`#[rok_db::test]`), `serde`, `axum`, `metrics`; `full` = all but `testing`.
+- Executors: `&Db`, `&mut Tx` (`db.begin()`, `db.transaction(|tx| ..)` with retries on
+  serialization failures), and replicas route reads automatically.
+
+## Models
+
+```rust
+#[derive(Debug, Clone, Model)]
+#[rok(table = "posts", timestamps, soft_delete, has_many(comments = Comment::POST_ID))]
+struct Post {
+    #[rok(primary_key, generated)] id: i64,
+    #[rok(belongs_to(author = User))] author_id: i64,
+    #[rok(validate(length(min = 1, max = 200)))] title: String,
+    created_at: DateTime<Utc>, updated_at: DateTime<Utc>, deleted_at: Option<DateTime<Utc>>,
+}
+```
+
+- Each field gets a column constant: `Post::TITLE` (`Column<Post>`); relations get
+  `Post::AUTHOR`, `Post::COMMENTS`.
+- Struct attributes: `table`, `timestamps`, `soft_delete`, `hooks`, `validate_with`,
+  `default_scope`, `has_many(..)`, `has_one(..)`, `crate = "path::to::rok_db"`,
+  `no_from_row`. Field attributes: `primary_key` (several = composite key), `generated`,
+  `column`, `skip`, `created_at` / `updated_at` / `deleted_at`, `version` (optimistic
+  locking), `tenant`, `validate(..)`, `belongs_to`.
+- Trait constants: `TABLE`, `PRIMARY_KEY`, `PRIMARY_KEYS`, `COLUMNS`, `GENERATED`, plus the
+  managed-column options. Custom column types: `#[derive(DbEnum)]`, `#[derive(DbNewtype)]`,
+  `impl_value!`, `CustomType`.
+
+## Records and model functions
+
+- `User::find(db, id)`, `find_or_fail`, `find_many(db, ids)`; ids are values or tuples for
+  composite keys (`IntoKey`).
+- `record.insert(db)`, `save(db)`, `save_only(db, Some(vec![..]))`, `upsert(db)`,
+  `upsert_on(db, [User::EMAIL])`, `delete(db)`, `force_delete`, `restore`, `reload`,
+  `track()` (save only changed columns), `User::insert_all(db, &rows)`,
+  `User::copy_in(db, &rows)` (binary COPY), `User::create().set(col, v).exec(db)`.
+- Relations: lazy `post.author().one(db)`, `user.posts().order_by(..).all(db)`; eager (no
+  N+1) `User::POSTS.load(db, &users)` -> `posts.get(&user)`.
+
+## Queries (`Select<M>`)
+
+- Start: `User::query()`, `User::filter(expr)`, `User::order_by(order)`.
+- Shape: `filter`, `filter_opt`, `filter_if`, `order_by` (`col.asc()`, `.desc()`,
+  `.nulls_last()`), `limit`, `offset`, `for_update`, `for_share`, `with_trashed`,
+  `only_trashed`, `unscoped`, `all_tenants`.
+- Run: `all`, `first`, `one`, `count`, `exists`, `stream`, `paginate(db, page, per_page)` ->
+  `Page { items, total, .. }`, `cursor_paginate(db, after, limit)` -> `CursorPage { items,
+  next }` (keyset; sort keys must be NOT NULL; expression orders allowed).
+- Aggregates and projections: `sum`, `avg`, `min`, `max`, `group_by`, `having`,
+  `let rows: Vec<(String, i64)> = User::query().group_by(User::ROLE)
+  .select((User::ROLE, User::ID.count())).fetch_all(db).await?`.
+- Writes: `.update().set(col, v).increment(col, n).exec(db)`, `.delete(db)`,
+  `.force_delete(db)`, `.restore(db)`.
+- `memoize(ttl)`: cached results in the `Db`'s query cache, invalidated by writes to the
+  tables read.
+- `to_sql()` returns the statement and parameters (for tests and debugging).
+- Expressions: column operators `eq ne gt gte lt lte like ilike contains starts_with
+  ends_with is_in not_in between is_null is_not_null in_subquery`, combined with `.and`,
+  `.or`, `!`, `Expr::all_of`, `Expr::any_of`, `Expr::exists`, `Expr::raw("sql ?", [v])`.
+  JSONB, arrays and full-text search have column helpers (`search`, `search_rank`).
+
+## Joins (RFC 0001)
+
+- `Post::query().join(Post::AUTHOR)` / `.left_join(..)`; ad-hoc:
+  `Category::ID.on(Post::CATEGORY_ID)`; chains: `.join(Comment::POST).join(Post::AUTHOR)`.
+- `filter`, `order_by`, `group_by`, `having`, `select` accept columns of any joined model;
+  using a model that isn't joined is a compile error (`InScope`).
+- Root rows are de-duplicated for `has_many` joins (`DISTINCT ON`); `count` uses
+  `COUNT(DISTINCT ..)`. Joined models' soft-delete, tenant and default scopes go in `ON`.
+- Also through joins: `paginate`, `cursor_paginate`, `memoize`, `update`, `delete`,
+  `force_delete`, `restore`.
+- Tuples (RFC 0004): `.all_with::<User, _>(db)` -> `Vec<(Post, User)>`;
+  `.all_with::<(User, Option<Category>), _>(db)`; `Option` is `None` on a LEFT JOIN miss.
+- Not supported: self-joins (the same table twice).
+
+## Platform features
+
+- Multi-tenancy: `#[rok(tenant)]`, `tenant::with_tenant(id, async { .. })`; tenant
+  models fail closed outside a tenant scope.
+- Audit log (`json`): `audit::install`, `audit::enable`, `audit::history`,
+  `audit::with_actor`.
+- Change feeds: LISTEN/NOTIFY listeners; read replicas; metrics; axum error responses;
+  hooks (`#[rok(hooks)]` + `impl Hooks`: `before_insert`, `after_insert`, `before_save`,
+  `after_save`, `before_delete`, `after_delete`) and validation (`ValidationErrors`).
+- Testing (`testing`): `#[rok_db::test] async fn t(db: Db) { .. }` gets a fresh database per
+  test (needs `DATABASE_URL` with CREATEDB; skips without it). `TestDb::create()` for manual
+  control.
+
+## Conventions
+
+- SQL safety: identifiers through `Sql::push_ident` / `push_column`, values through
+  `Sql::bind`; never format values into SQL.
+- Lints: `unsafe_code = "forbid"`, `missing_docs`, `unreachable_pub`; clippy clean with
+  `-D warnings`. Public futures are `Send`.
+- Errors: `rok_db::Error` (`NotFound`, `Conflict` (stale `version`), `Validation`, `Hook`,
+  `InvalidQuery`, `InvalidCursor`, `Encode`, `Config`, `Database`, `Migrate`).
+- Tests: SQL shape (`crates/rok-db/tests/sql.rs`, feature files like `joins.rs`), Postgres
+  behaviour (`#[rok_db::test]`), compile-time guarantees as `compile_fail` doctests in
+  `crates/rok-db/src/lib.rs`.
+- Changes to the public API go through an RFC; commits follow Conventional Commits.

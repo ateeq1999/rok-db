@@ -10,3 +10,6 @@
 !/SECURITY.md
 !/docs/**/*.md
 !/.github/**/*.md
+!/AGENTS.md
+!/CLAUDE.md
+!/.agents/**/*.md

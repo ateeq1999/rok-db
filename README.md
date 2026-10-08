@@ -19,7 +19,7 @@ An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github
 
 ```toml
 [dependencies]
-rok-db = { git = "https://github.com/ateeq1999/rok-db", features = ["chrono", "uuid", "json"] }
+rok-db = { version = "0.3", features = ["chrono", "uuid", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -756,6 +756,8 @@ cargo run -p rok-db --example blog             # needs DATABASE_URL
 ```
 
 Database tests use per-connection `TEMP` tables, so they never touch existing data.
+
+Coding agents: start with [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
 
 ## License
 

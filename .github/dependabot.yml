@@ -15,3 +15,7 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci"
+    ignore:
+      # Its tags are toolchain versions, not action versions: the MSRV job pins the
+      # toolchain through `rust-version` and the others follow `stable`.
+      - dependency-name: dtolnay/rust-toolchain

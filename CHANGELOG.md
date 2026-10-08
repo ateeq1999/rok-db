@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-03
+
+### Fixed
+
+- The published crates include the `LICENSE-MIT` and `LICENSE-APACHE` texts.
+- docs.rs builds `rok-db-core` with all features; `rok-db-core` and `rok-db-macros` have
+  crates.io keywords and categories.
+- The README installs rok-db from crates.io instead of git.
+- Sources are checked out and packaged with LF line endings (`.gitattributes`).
+- The MSRV CI job checks with the `rust-version` toolchain again: a Dependabot update had
+  turned `dtolnay/rust-toolchain@1.85` into `@1.120`. Dependabot now ignores that action.
+
+### Added
+
+- `AGENTS.md`, `llms.txt` and `.agents/skills/` (check, commit, pr, rfc, model, query,
+  quality, release) for coding agents; `CLAUDE.md` and `.claude` point to them.
+
 ## [0.3.0] - 2026-10-03
 
 ### Added
@@ -191,7 +208,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed the crates from `orm`, `orm-core` and `orm-macros` to `rok-db`,
   `rok-db-core` and `rok-db-macros`.
 
-[Unreleased]: https://github.com/ateeq1999/rok-db/compare/v0.3.0...main
+[Unreleased]: https://github.com/ateeq1999/rok-db/compare/v0.3.1...main
+[0.3.1]: https://github.com/ateeq1999/rok-db/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ateeq1999/rok-db/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ateeq1999/rok-db/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ateeq1999/rok-db/releases/tag/v0.1.0
