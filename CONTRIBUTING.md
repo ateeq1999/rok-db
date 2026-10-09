@@ -158,7 +158,7 @@ Maintainers cut releases from `main`:
 3. Bump `version` in `[workspace.package]` and in the
    `[workspace.dependencies]` entries of the root `Cargo.toml`.
 4. Commit as `chore(release): vX.Y.Z`, then tag `vX.Y.Z` and push the tag.
-5. Run `cargo package --workspace` (a dry run that builds and verifies all three crates).
+5. Run `cargo package --workspace` (a dry run that builds and verifies all four crates).
 6. Publish in dependency order:
    `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db && cargo publish -p rok-db-codegen`.
 7. Create a GitHub release from the tag using the changelog entry.

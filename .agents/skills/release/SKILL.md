@@ -1,6 +1,6 @@
 ---
 name: release
-description: How rok-db versions and publishes its three crates.
+description: How rok-db versions and publishes its four crates.
 ---
 
 # Releases
@@ -14,7 +14,7 @@ a `y` bump may break).
 3. Bump `version` in `[workspace.package]` and in the `[workspace.dependencies]` entries of
    the root `Cargo.toml`.
 4. Commit `chore(release): vX.Y.Z`, tag `vX.Y.Z`, push the tag.
-5. Dry run: `cargo package --workspace` builds and verifies all three crates (each must list
+5. Dry run: `cargo package --workspace` builds and verifies all four crates (each must list
    `LICENSE-MIT` and `LICENSE-APACHE`). Publish from a checkout with LF line endings
    (`.gitattributes` enforces it).
 6. Publish in dependency order:
