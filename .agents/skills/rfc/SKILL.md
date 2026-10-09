@@ -24,4 +24,4 @@ Steps:
 5. When implementation changes the design, amend the RFC in the same pull request.
 
 Existing RFCs: `0001-joins` (accepted), `0002-cli` (draft), `0003-multiple-databases`
-(draft), `0004-joined-tuples` (accepted).
+(draft), `0004-joined-tuples` (accepted), `0005-numeric-and-interval` (draft).
