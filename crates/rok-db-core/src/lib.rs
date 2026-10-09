@@ -17,6 +17,7 @@ mod expr;
 pub mod join;
 mod key;
 pub mod metrics;
+pub mod migration;
 mod model;
 pub mod notify;
 mod page;

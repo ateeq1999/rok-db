@@ -549,7 +549,7 @@ impl DbBuilder {
 /// Pass `&mut *tx` wherever an [`Executor`](crate::Executor) is expected.
 /// A transaction that is dropped without [`commit`](Tx::commit) is rolled back.
 pub struct Tx {
-    inner: sqlx::Transaction<'static, Postgres>,
+    pub(crate) inner: sqlx::Transaction<'static, Postgres>,
     ctx: Option<Arc<Context>>,
     touched: Mutex<Vec<&'static str>>,
 }
