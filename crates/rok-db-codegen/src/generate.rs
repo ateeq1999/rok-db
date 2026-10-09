@@ -48,13 +48,11 @@ pub struct Options {
 impl Options {
     /// Defaults: `db/` to `db-gen/`, rok-db from crates.io.
     pub fn new() -> Self {
-        let version = env!("CARGO_PKG_VERSION");
-        let minor = version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
         Self {
             input: PathBuf::from("db"),
             output: PathBuf::from("db-gen"),
             crate_name: "db-gen".to_owned(),
-            rok_db: Dependency::Version(minor),
+            rok_db: Dependency::Version(default_version()),
             strict: false,
             database_url: None,
             migration: None,
@@ -62,6 +60,15 @@ impl Options {
             allow_destructive: false,
         }
     }
+}
+
+/// `0.4` for rok-db-codegen 0.4.x: the matching rok-db release.
+fn default_version() -> String {
+    env!("CARGO_PKG_VERSION")
+        .splitn(3, '.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 impl Default for Options {
@@ -505,8 +512,9 @@ fn cargo_toml(options: &Options, features: &BTreeSet<Feature>) -> String {
         Dependency::Path(p) => {
             let relative = relative_path(&options.output, p);
             format!(
-                "path = {:?}",
-                relative.display().to_string().replace('\\', "/")
+                "path = {:?}, version = {:?}",
+                relative.display().to_string().replace('\\', "/"),
+                default_version()
             )
         }
     };

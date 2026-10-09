@@ -68,6 +68,8 @@ cargo deny check                                             # licenses and advi
 | `crates/rok-db`         | Public facade crate: re-exports, prelude, docs, tests, examples |
 | `crates/rok-db-core`    | Runtime: `Db`, `Model`, query builders, `Value`, errors       |
 | `crates/rok-db-macros`  | `#[derive(Model)]`                                           |
+| `crates/rok-db-codegen` | `rok-db-gen`: a crate from `.sql` files (see `docs/v4.md`)   |
+| `examples/sqlgen`       | example project with its generated crate committed           |
 | `docs/rfcs`             | Design proposals                                             |
 
 ## Change protocol
@@ -158,7 +160,7 @@ Maintainers cut releases from `main`:
 4. Commit as `chore(release): vX.Y.Z`, then tag `vX.Y.Z` and push the tag.
 5. Run `cargo package --workspace` (a dry run that builds and verifies all three crates).
 6. Publish in dependency order:
-   `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db`.
+   `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db && cargo publish -p rok-db-codegen`.
 7. Create a GitHub release from the tag using the changelog entry.
 
 ## Coding agents

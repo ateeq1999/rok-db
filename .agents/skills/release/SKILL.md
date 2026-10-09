@@ -5,7 +5,7 @@ description: How rok-db versions and publishes its three crates.
 
 # Releases
 
-`rok-db`, `rok-db-core` and `rok-db-macros` share one version (lockstep, SemVer; while `0.y.z`,
+`rok-db`, `rok-db-core`, `rok-db-macros` and `rok-db-codegen` share one version (lockstep, SemVer; while `0.y.z`,
 a `y` bump may break).
 
 1. CI on `main` is green.
@@ -18,7 +18,7 @@ a `y` bump may break).
    `LICENSE-MIT` and `LICENSE-APACHE`). Publish from a checkout with LF line endings
    (`.gitattributes` enforces it).
 6. Publish in dependency order:
-   `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db`.
+   `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db && cargo publish -p rok-db-codegen`.
 7. Create the GitHub release from the changelog entry.
 
 Downstream: rok-ui depends on rok-db from crates.io (`rok-db = "0.1"` as of rok-ui 0.6). After
