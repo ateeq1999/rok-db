@@ -1,0 +1,103 @@
+name: Release
+
+# Publishes to crates.io after CI passes on `main` (a merged pull request), when the
+# workspace version is not on crates.io yet. Merges that don't bump the version publish
+# nothing. Each crate is checked separately, so a failed run can be re-run and picks up
+# where it stopped.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Dependency order: each crate's dependencies are published before it.
+  CRATES: rok-db-macros rok-db-core rok-db rok-db-codegen
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "rok-db") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Workspace version: $version"
+
+      - name: Find crates to publish
+        id: pending
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          pending=""
+          for crate in $CRATES; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' \
+              -A "rok-db release workflow (https://github.com/${{ github.repository }})" \
+              "https://crates.io/api/v1/crates/$crate/$VERSION")
+            case "$status" in
+              200) echo "$crate $VERSION is already published" ;;
+              404) pending="$pending $crate" ;;
+              *) echo "::error::crates.io returned $status for $crate $VERSION"; exit 1 ;;
+            esac
+          done
+          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
+          echo "To publish:${pending:- nothing}"
+
+      - name: Publish
+        if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PENDING: ${{ steps.pending.outputs.crates }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::The CARGO_REGISTRY_TOKEN secret is not set"
+            exit 1
+          fi
+          # `cargo publish` waits until each crate is in the index, so the next one
+          # resolves its new dependency.
+          for crate in $PENDING; do
+            cargo publish -p "$crate"
+          done
+
+      - name: Tag and create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
+            exit 0
+          fi
+          # The changelog section for this version, without its heading.
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "See CHANGELOG.md." > notes.md
+          fi
+          gh release create "$tag" --target "$SHA" --title "$tag" --notes-file notes.md

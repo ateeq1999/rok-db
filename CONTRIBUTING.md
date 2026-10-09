@@ -150,18 +150,21 @@ Breaking changes add `!` after the type (`feat(query)!: …`) and a
 
 ## Release process
 
-Maintainers cut releases from `main`:
+Releases are published by `.github/workflows/release.yml` when a version bump is merged
+into `main`:
 
-1. Make sure CI on `main` is green.
-2. Move the **Unreleased** entries in `CHANGELOG.md` under a new
-   `## [x.y.z] - YYYY-MM-DD` heading and update the comparison links.
-3. Bump `version` in `[workspace.package]` and in the
-   `[workspace.dependencies]` entries of the root `Cargo.toml`.
-4. Commit as `chore(release): vX.Y.Z`, then tag `vX.Y.Z` and push the tag.
-5. Run `cargo package --workspace` (a dry run that builds and verifies all four crates).
-6. Publish in dependency order:
-   `cargo publish -p rok-db-macros && cargo publish -p rok-db-core && cargo publish -p rok-db && cargo publish -p rok-db-codegen`.
-7. Create a GitHub release from the tag using the changelog entry.
+1. Open a pull request that moves the **Unreleased** entries in `CHANGELOG.md` under a new
+   `## [x.y.z] - YYYY-MM-DD` heading, updates the comparison links and bumps `version` in
+   `[workspace.package]` and the `[workspace.dependencies]` entries of the root
+   `Cargo.toml`. Commit it as `chore(release): vX.Y.Z`.
+2. Check `cargo package --workspace` passes (a dry run that builds and verifies all four
+   crates).
+3. Merge it. After CI passes on `main`, the workflow publishes the crates that are not on
+   crates.io yet, in dependency order, then tags `vX.Y.Z` and creates the GitHub release
+   from the changelog entry.
+
+The workflow needs the `CARGO_REGISTRY_TOKEN` repository secret. A failed run can be re-run;
+crates already published are skipped.
 
 ## Coding agents
 

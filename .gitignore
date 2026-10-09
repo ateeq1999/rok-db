@@ -12,4 +12,6 @@
 !/.github/**/*.md
 !/AGENTS.md
 !/CLAUDE.md
+!/crates/*/README.md
+!/examples/**/*.md
 !/.agents/**/*.md
