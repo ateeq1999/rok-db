@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A release workflow publishes to crates.io when a version bump is merged into `main`, then
+  tags it and creates the GitHub release.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added
