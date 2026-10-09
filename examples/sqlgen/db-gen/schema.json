@@ -1,0 +1,155 @@
+{
+  "enums": [
+    {
+      "name": "user_role",
+      "values": [
+        "admin",
+        "editor",
+        "member"
+      ],
+      "module": "types",
+      "doc": [
+        "Who may do what."
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "name": "posts",
+      "module": "post",
+      "doc": [
+        "Something a user wrote."
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "BIGSERIAL",
+          "nullable": false
+        },
+        {
+          "name": "author_id",
+          "sql_type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "default": "''"
+        },
+        {
+          "name": "tags",
+          "sql_type": "TEXT[]",
+          "nullable": false,
+          "default": "'{}'"
+        },
+        {
+          "name": "views",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "published_at",
+          "sql_type": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "foreign_keys": [
+        {
+          "name": "posts_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ]
+    },
+    {
+      "name": "users",
+      "module": "user",
+      "doc": [
+        "A person who can sign in."
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "BIGSERIAL",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "doc": [
+            "Unique, compared case-insensitively by the queries below."
+          ]
+        },
+        {
+          "name": "name",
+          "sql_type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "role",
+          "sql_type": "user_role",
+          "nullable": false,
+          "default": "'member'"
+        },
+        {
+          "name": "created_at",
+          "sql_type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "TIMESTAMPTZ",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "deleted_at",
+          "sql_type": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "uniques": [
+        {
+          "name": "users_email_key",
+          "columns": [
+            "email"
+          ]
+        }
+      ]
+    }
+  ],
+  "indexes": [
+    {
+      "name": "posts_author_idx",
+      "table": "posts",
+      "sql": "CREATE INDEX posts_author_idx ON posts(author_id)"
+    },
+    {
+      "name": "users_role_idx",
+      "table": "users",
+      "sql": "CREATE INDEX users_role_idx ON users(role)"
+    }
+  ],
+  "extras": []
+}

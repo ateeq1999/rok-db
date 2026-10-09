@@ -19,7 +19,7 @@ An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github
 
 ```toml
 [dependencies]
-rok-db = { version = "0.3", features = ["chrono", "uuid", "json"] }
+rok-db = { version = "0.4", features = ["chrono", "uuid", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -667,6 +667,38 @@ Trigger-based (feature `json`): it records every insert, update and delete of th
 and raw SQL, with old/new rows as JSONB and the changed columns. No-op updates are skipped.
 `AuditEntry` is a regular model you can query.
 
+### Code from `.sql` files (`rok-db-gen`)
+
+Keep the schema and hand-written queries in `.sql` files and generate a crate from them.
+Each `db/<name>.sql` becomes `db-gen/src/<name>.rs`, with models and enums, typed query
+functions and generated migrations:
+
+```sql
+-- db/user.sql
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT);
+
+-- name: find_by_email :one
+SELECT * FROM users WHERE email = $1;
+```
+
+```sh
+cargo install rok-db-codegen
+rok-db-gen generate                        # db-gen/: models, queries, migration 0001_init
+rok-db-gen generate --migration add_slug   # after editing db/*.sql
+rok-db-gen check                           # in CI
+```
+
+```rust
+db_gen::up(&db).await?;                                          // apply migrations
+let ann = db_gen::user::find_by_email(&db, "ann@example.com").await?; // Option<User>
+let named = db_gen::user::User::filter(db_gen::user::User::NAME.is_not_null()).all(&db).await?;
+```
+
+Query types are checked by PostgreSQL, and the results are cached in `db-gen/queries.json`.
+Migrations come with undo SQL, a guard against destructive steps and `--rename`. The
+migration runner (`rok_db::migration`) can also be used without the generator. See
+[docs/v4.md](docs/v4.md) and [examples/sqlgen](examples/sqlgen).
+
 ### Retrying transactions
 
 ```rust
@@ -735,6 +767,7 @@ let total: i64 = rok_db::raw("SELECT COUNT(*) FROM users").scalar(&db).await?;
 | `rok-db` | the crate to depend on: re-exports everything plus the derive |
 | `rok-db-core` | runtime: `Db`, `Model`, query builders, `Value` |
 | `rok-db-macros` | `#[derive(Model)]` |
+| `rok-db-codegen` | the `rok-db-gen` binary: a crate from `.sql` files |
 
 ## Contributing
 

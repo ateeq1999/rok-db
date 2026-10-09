@@ -6,8 +6,8 @@
 
 This file is a dense digest for coding agents. Read `AGENTS.md` for the task skills, the
 README for examples and `docs/rfcs/` for designs. Crates: `rok-db` (facade, the only public
-API), `rok-db-core` (runtime), `rok-db-macros` (derive). MSRV 1.85. License: MIT OR
-Apache-2.0. Current release: 0.3.1 on crates.io (`rok-db = "0.3"`); everything below is
+API), `rok-db-core` (runtime), `rok-db-macros` (derive), `rok-db-codegen` (`rok-db-gen`). MSRV 1.85. License: MIT OR
+Apache-2.0. Current release: 0.4.0 on crates.io (`rok-db = "0.4"`); everything below is
 released.
 
 ## Setup
@@ -105,6 +105,25 @@ struct Post {
 - Testing (`testing`): `#[rok_db::test] async fn t(db: Db) { .. }` gets a fresh database per
   test (needs `DATABASE_URL` with CREATEDB; skips without it). `TestDb::create()` for manual
   control.
+
+## Migrations and code generation
+
+- `rok_db::migration`: `Migration { version, name, up, down }`, `apply(db, &[..])`,
+  `revert(db, &[..], steps)`, `applied(db)`. History lives in `_rok_db_migrations` with
+  checksums. Each migration runs in its own transaction with an advisory lock. Edited,
+  unknown and out-of-order migrations are refused.
+- `rok-db-gen` (crate `rok-db-codegen`): `db/<name>.sql` becomes `db-gen/src/<name>.rs`, a
+  separate crate that is committed.
+  - Models and enums come from `CREATE TABLE` / `CREATE TYPE`.
+  - sqlc-style queries (`-- name: f :one|:one!|:many|:stream|:exec`) become typed async
+    functions. PostgreSQL checks their types in a temporary database, and the results are
+    cached in `db-gen/queries.json`.
+  - Migrations: `db-gen/migrations/<n>_<name>.{up,down}.sql`, diffed against
+    `db-gen/schema.json`, applied with `db_gen::up(&db)` / `db_gen::down(&db, n)`.
+  - Commands: `rok-db-gen generate [--migration name] [--rename a=b] [--allow-destructive]`
+    and `rok-db-gen check` (CI). Settings live in `rok-db.toml` `[gen]`.
+  - Directives: `-- rok:tenant` (column), `-- rok:down` (undo SQL for the statement above),
+    `-- param: $2 name`; `AS "col!"` / `AS "col?"` override nullability. See `docs/v4.md`.
 
 ## Conventions
 

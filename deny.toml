@@ -21,6 +21,10 @@ allow = [
     "Zlib",
 ]
 
+# Unpublished workspace crates (the generated example) need no license.
+[licenses.private]
+ignore = true
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

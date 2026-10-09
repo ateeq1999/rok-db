@@ -16,6 +16,7 @@ Start here:
 | Propose a design (public API, dependency, MSRV, new database) | `.agents/skills/rfc/SKILL.md` |
 | Change `#[derive(Model)]` or the `Model` trait | `.agents/skills/model/SKILL.md` |
 | Change query building, SQL rendering or execution | `.agents/skills/query/SKILL.md` |
+| Change `rok-db-gen` (SQL to Rust generation) or migrations | `.agents/skills/codegen/SKILL.md` |
 | Review a change for code quality | `.agents/skills/quality/SKILL.md` |
 | Cut a release | `.agents/skills/release/SKILL.md` |
 
