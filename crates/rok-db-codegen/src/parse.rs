@@ -637,6 +637,37 @@ mod tests {
     }
 
     #[test]
+    fn numeric_and_interval_spellings() {
+        let p = parse_text(
+            "CREATE TABLE plans (
+                 price NUMERIC(10, 2) NOT NULL,
+                 rate DECIMAL,
+                 period INTERVAL NOT NULL,
+                 grace INTERVAL DAY TO SECOND,
+                 timeout INTERVAL(3),
+                 tiers NUMERIC[]
+             );",
+        )
+        .unwrap();
+        let types: Vec<&str> = p.schema.tables[0]
+            .columns
+            .iter()
+            .map(|c| c.sql_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "NUMERIC(10,2)",
+                "NUMERIC",
+                "INTERVAL",
+                "INTERVAL DAY TO SECOND",
+                "INTERVAL(3)",
+                "NUMERIC[]"
+            ]
+        );
+    }
+
+    #[test]
     fn tables_columns_and_constraints() {
         let p = parse_text(
             "CREATE TYPE mood AS ENUM ('happy', 'sad');

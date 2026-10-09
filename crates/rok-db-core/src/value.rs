@@ -13,8 +13,8 @@ use crate::Result;
 /// which PostgreSQL requires when binding parameters.
 ///
 /// You rarely build a `Value` yourself: anything implementing `Into<Value>`
-/// (integers, floats, strings, `bool`, `Vec<u8>`, their `Option`s and, with
-/// the matching features, `chrono`, `uuid` and JSON types) can be passed to
+/// (integers, floats, strings, `bool`, `Vec<u8>`, `PgInterval`, their `Option`s
+/// and, with the matching features, `chrono`, `uuid`, `Decimal` and JSON types) can be passed to
 /// the query builder directly.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -53,6 +53,12 @@ pub enum Value {
     #[cfg(feature = "json")]
     /// `JSONB` / `JSON`
     Json(Option<serde_json::Value>),
+    #[cfg(feature = "decimal")]
+    /// `NUMERIC` / `DECIMAL`, as a `rust_decimal` [`Decimal`](sqlx::types::Decimal)
+    /// (up to 28 significant digits).
+    Decimal(Option<sqlx::types::Decimal>),
+    /// `INTERVAL`, as months, days and microseconds.
+    Interval(Option<sqlx::postgres::types::PgInterval>),
     /// Any other type sqlx can encode: enums and newtypes from
     /// `#[derive(DbEnum)]` / `#[derive(DbNewtype)]`, or types registered
     /// with [`impl_value!`](crate::impl_value). Build one with [`Value::custom`].
@@ -98,6 +104,9 @@ impl Value {
             Value::NaiveTime(v) => v.is_none(),
             #[cfg(feature = "json")]
             Value::Json(v) => v.is_none(),
+            #[cfg(feature = "decimal")]
+            Value::Decimal(v) => v.is_none(),
+            Value::Interval(v) => v.is_none(),
             Value::Custom(v) => v.0.is_null(),
         }
     }
@@ -138,6 +147,9 @@ impl Value {
             "DATE" => Value::from(row.try_get::<sqlx::types::chrono::NaiveDate, _>(name)?),
             #[cfg(feature = "chrono")]
             "TIME" => Value::from(row.try_get::<sqlx::types::chrono::NaiveTime, _>(name)?),
+            #[cfg(feature = "decimal")]
+            "NUMERIC" => Value::from(row.try_get::<sqlx::types::Decimal, _>(name)?),
+            "INTERVAL" => Value::from(row.try_get::<sqlx::postgres::types::PgInterval, _>(name)?),
             other => {
                 return Err(crate::Error::InvalidQuery(format!(
                     "can't use a `{other}` value as a keyset sort key"
@@ -176,6 +188,9 @@ impl Value {
             Value::NaiveTime(v) => enc(v, &mut buf),
             #[cfg(feature = "json")]
             Value::Json(v) => enc(v, &mut buf),
+            #[cfg(feature = "decimal")]
+            Value::Decimal(v) => enc(v, &mut buf),
+            Value::Interval(v) => enc(v, &mut buf),
             Value::Custom(v) => v.0.encode(&mut buf),
         }
         .map_err(crate::Error::Encode)?;
@@ -207,6 +222,9 @@ impl Value {
             Value::NaiveTime(v) => args.add(v),
             #[cfg(feature = "json")]
             Value::Json(v) => args.add(v),
+            #[cfg(feature = "decimal")]
+            Value::Decimal(v) => args.add(v),
+            Value::Interval(v) => args.add(v),
             Value::Custom(v) => v.0.bind(args),
         };
         res.map_err(crate::Error::Encode)
@@ -392,6 +410,16 @@ impl_from! {
 #[cfg(feature = "json")]
 impl_from! { Json => serde_json::Value }
 
+#[cfg(feature = "decimal")]
+impl_from! { Decimal => sqlx::types::Decimal }
+
+#[cfg(feature = "decimal")]
+impl_array!(sqlx::types::Decimal);
+
+impl_from! { Interval => sqlx::postgres::types::PgInterval }
+
+impl_array!(sqlx::postgres::types::PgInterval);
+
 #[cfg(feature = "json")]
 impl<T: serde::Serialize> From<sqlx::types::Json<T>> for Value {
     fn from(v: sqlx::types::Json<T>) -> Self {
@@ -494,6 +522,9 @@ impl std::fmt::Display for Value {
             Value::NaiveTime(v) => show(f, v),
             #[cfg(feature = "json")]
             Value::Json(v) => show(f, v),
+            #[cfg(feature = "decimal")]
+            Value::Decimal(v) => show(f, v),
+            Value::Interval(v) => show(f, v),
             Value::Custom(v) => v.0.show(f),
         }
     }

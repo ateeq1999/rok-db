@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `NUMERIC` and `INTERVAL` columns (RFC 0005). `NUMERIC` maps to `rust_decimal`'s `Decimal`
+  behind the new `decimal` feature (in `full`), `INTERVAL` to sqlx's `PgInterval`. Both work
+  in models, filters, `set`, arrays, `COPY` and keyset cursors (`Value::Decimal`,
+  `Value::Interval`).
+- `rok-db-gen` generates `NUMERIC`/`DECIMAL` and `INTERVAL` columns and parameters instead of
+  rejecting them, and enables `decimal` in the generated crate when needed. The example has
+  a `plans` table using both.
 - A release workflow publishes to crates.io when a version bump is merged into `main`, then
   tags it and creates the GitHub release.
 

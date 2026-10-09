@@ -17,8 +17,9 @@ released.
 - `Db::connect(url)`, `Db::connect_env()` (DATABASE_URL), `Db::builder()` with
   `max_connections`, `acquire_timeout`, `query_cache(capacity)`, `slow_query_threshold`,
   `read_replica(url)`, `shared_cache_invalidation()`, then `.connect(url)`.
-- Features: `chrono`, `uuid`, `json`, `migrate` (`db.migrate("./migrations")`), `testing`
-  (`#[rok_db::test]`), `serde`, `axum`, `metrics`; `full` = all but `testing`.
+- Features: `chrono`, `uuid`, `decimal` (`NUMERIC` as `sqlx::types::Decimal`), `json`, `migrate` (`db.migrate("./migrations")`), `testing`
+  (`#[rok_db::test]`), `serde`, `axum`, `metrics`; `full` = all but `testing`. `INTERVAL`
+  columns are `sqlx::postgres::types::PgInterval` (no feature).
 - Executors: `&Db`, `&mut Tx` (`db.begin()`, `db.transaction(|tx| ..)` with retries on
   serialization failures), and replicas route reads automatically.
 

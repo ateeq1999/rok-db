@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 |-----------|----------------------------------------------------------|
 | `chrono`  | `DateTime<Utc>`, `NaiveDateTime`, `NaiveDate`, `NaiveTime` |
 | `uuid`    | `Uuid` columns                                           |
+| `decimal` | `NUMERIC` columns as `rust_decimal`'s `Decimal`          |
 | `json`    | `serde_json::Value` and `Json<T>` columns                 |
 | `migrate` | `Db::migrate("./migrations")`                            |
 | `testing` | `#[rok_db::test]`: a temporary database per test        |
@@ -584,8 +585,20 @@ Doc::filter(Doc::BODY.search_in("english", "\"query builder\" -java"))   // webs
     .await?;
 ```
 
-`Vec<T>` fields map to PostgreSQL arrays for `String`, `bool`, integers, floats and (with the
-features) `Uuid` and dates.
+`Vec<T>` fields map to PostgreSQL arrays for `String`, `bool`, integers, floats, `PgInterval`
+and (with the features) `Uuid`, `Decimal` and dates.
+
+`NUMERIC` columns use `rok_db::sqlx::types::Decimal` (feature `decimal`, 28 significant
+digits; `NaN` is a decode error) and `INTERVAL` columns use
+`rok_db::sqlx::postgres::types::PgInterval` (months, days and microseconds, no feature).
+Both work in filters, `set`, `COPY` and keyset cursors:
+
+```rust
+Plan::filter(Plan::PRICE.lt(Decimal::new(1000, 2)))   // price < 10.00
+    .order_by(Plan::PRICE)
+    .all(&db)
+    .await?;
+```
 
 ### Read replicas
 

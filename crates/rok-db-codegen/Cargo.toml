@@ -33,6 +33,6 @@ toml = { version = "0.9", default-features = false, features = ["parse", "serde"
 workspace = true
 
 [dev-dependencies]
-rok-db = { path = "../rok-db", features = ["testing", "chrono"] }
+rok-db = { path = "../rok-db", features = ["testing", "chrono", "decimal"] }
 sqlgen-db = { path = "../../examples/sqlgen/db-gen" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

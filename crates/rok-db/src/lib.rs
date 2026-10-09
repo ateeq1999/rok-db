@@ -133,6 +133,7 @@
 //! |-----------|------------------------------------------------------|
 //! | `chrono`  | `chrono` date/time column types                      |
 //! | `uuid`    | `uuid::Uuid` columns                                 |
+//! | `decimal` | `NUMERIC` columns as `sqlx::types::Decimal` (`rust_decimal`) |
 //! | `json`    | `serde_json::Value` and `sqlx::types::Json<T>` columns |
 //! | `migrate` | [`Db::migrate`] for running sqlx migrations          |
 //! | `testing` | [`macro@test`] and [`testing::TestDb`]: a temporary database per test |
