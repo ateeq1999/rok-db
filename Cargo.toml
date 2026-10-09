@@ -4,6 +4,7 @@ members = [
     "crates/rok-db-core",
     "crates/rok-db-macros",
     "crates/rok-db",
+    "crates/rok-db-codegen",
 ]
 
 [workspace.package]
