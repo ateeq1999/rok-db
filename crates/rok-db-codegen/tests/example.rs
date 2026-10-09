@@ -4,8 +4,10 @@
 use std::path::PathBuf;
 
 use rok_db::prelude::*;
+use rok_db::sqlx::postgres::types::PgInterval;
+use rok_db::sqlx::types::Decimal;
 use rok_db_codegen::{Dependency, Options, differences, generate};
-use sqlgen_db::{post, types::UserRole, user};
+use sqlgen_db::{plan, post, types::UserRole, user};
 
 fn example_options() -> Options {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/sqlgen");
@@ -33,7 +35,7 @@ fn committed_example_is_up_to_date() {
 
 #[rok_db::test]
 async fn generated_code_runs(db: Db) {
-    assert_eq!(sqlgen_db::up(&db).await.unwrap(), [1]);
+    assert_eq!(sqlgen_db::up(&db).await.unwrap(), [1, 2]);
 
     let ann = user::User {
         id: 0,
@@ -97,12 +99,45 @@ async fn generated_code_runs(db: Db) {
     let feed: Vec<post::FeedRow> = post::feed(&db).try_collect().await.unwrap();
     assert_eq!(feed[0].author_email, "Ann@example.com");
 
-    // Reverting the init migration removes everything.
-    assert_eq!(sqlgen_db::down(&db, 1).await.unwrap(), [1]);
-    let tables: i64 =
-        rok_db::raw("SELECT count(*) FROM pg_tables WHERE tablename IN ('users', 'posts')")
-            .scalar(&db)
-            .await
-            .unwrap();
+    // NUMERIC and INTERVAL: parameters and columns, exact to the cent.
+    let month = PgInterval {
+        months: 1,
+        days: 0,
+        microseconds: 0,
+    };
+    let year = PgInterval {
+        months: 12,
+        days: 0,
+        microseconds: 0,
+    };
+    let basic = plan::create_plan(&db, "basic", Decimal::new(999, 2), month)
+        .await
+        .unwrap();
+    plan::create_plan(&db, "pro", Decimal::new(9_999, 2), year)
+        .await
+        .unwrap();
+    assert_eq!(
+        (basic.price.to_string().as_str(), basic.trial),
+        ("9.99", None)
+    );
+    let cheap = plan::cheaper_than(&db, Decimal::new(10_000, 2))
+        .await
+        .unwrap();
+    assert_eq!(cheap.len(), 2);
+    assert_eq!(cheap[0].period, month);
+    let cheapest = plan::Plan::filter(plan::Plan::PRICE.lt(Decimal::new(1_000, 2)))
+        .one(&db)
+        .await
+        .unwrap();
+    assert_eq!(cheapest.name, "basic");
+
+    // Reverting both migrations removes everything.
+    assert_eq!(sqlgen_db::down(&db, 2).await.unwrap(), [2, 1]);
+    let tables: i64 = rok_db::raw(
+        "SELECT count(*) FROM pg_tables WHERE tablename IN ('users', 'posts', 'plans')",
+    )
+    .scalar(&db)
+    .await
+    .unwrap();
     assert_eq!(tables, 0);
 }

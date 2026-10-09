@@ -95,6 +95,22 @@ fn parse<T: FromStr>(bytes: Vec<u8>) -> Result<T, Error> {
         .map_err(|_| Error::InvalidCursor("malformed value".into()))
 }
 
+/// Parse `months,days,microseconds` (the cursor form of an `INTERVAL`).
+fn interval(s: &str) -> Result<sqlx::postgres::types::PgInterval, Error> {
+    let malformed = || Error::InvalidCursor("malformed interval".into());
+    let mut parts = s.split(',');
+    let mut next = || parts.next().ok_or_else(malformed);
+    let interval = sqlx::postgres::types::PgInterval {
+        months: next()?.parse().map_err(|_| malformed())?,
+        days: next()?.parse().map_err(|_| malformed())?,
+        microseconds: next()?.parse().map_err(|_| malformed())?,
+    };
+    if parts.next().is_some() {
+        return Err(malformed());
+    }
+    Ok(interval)
+}
+
 fn encode(value: &Value) -> String {
     fn part<T>(tag: char, v: &Option<T>, f: impl FnOnce(&T) -> Vec<u8>) -> String {
         match v {
@@ -124,6 +140,11 @@ fn encode(value: &Value) -> String {
         Value::NaiveTime(v) => part('T', v, |v| s(v)),
         #[cfg(feature = "json")]
         Value::Json(v) => part('j', v, |v| s(v)),
+        #[cfg(feature = "decimal")]
+        Value::Decimal(v) => part('m', v, |v| s(v)),
+        Value::Interval(v) => part('v', v, |v| {
+            format!("{},{},{}", v.months, v.days, v.microseconds).into_bytes()
+        }),
         // Custom types can't be decoded generically; `x` makes the cursor
         // fail to parse with a clear error instead of misbehaving.
         Value::Custom(v) => format!("x{}", hex(format!("{v:?}").as_bytes())),
@@ -175,6 +196,9 @@ fn decode(part: &str) -> Result<Value, Error> {
         #[cfg(feature = "json")]
         'j' => val!(Json, |b| serde_json::from_slice(&b)
             .map_err(|_| Error::InvalidCursor("malformed json".into()))?),
+        #[cfg(feature = "decimal")]
+        'm' => val!(Decimal, |b| parse(b)?),
+        'v' => val!(Interval, |b| interval(&text(b)?)?),
         'x' => {
             return Err(Error::InvalidCursor(
                 "custom column types can't be used as keyset pagination columns".into(),
@@ -217,6 +241,12 @@ mod tests {
             Value::from(-1.5_f64),
             Value::from(true),
             Value::from(vec![0_u8, 255]),
+            Value::from(sqlx::postgres::types::PgInterval {
+                months: 1,
+                days: -2,
+                microseconds: 3_000_000,
+            }),
+            Value::from(None::<sqlx::postgres::types::PgInterval>),
         ]);
         let encoded = cursor.to_string();
         assert!(
@@ -228,9 +258,21 @@ mod tests {
         assert_eq!(encoded.parse::<Cursor>().unwrap(), cursor);
     }
 
+    #[cfg(feature = "decimal")]
+    #[test]
+    fn round_trips_decimals() {
+        let price = sqlx::types::Decimal::new(-123_456, 3);
+        let cursor = Cursor::new([
+            Value::from(price),
+            Value::from(None::<sqlx::types::Decimal>),
+        ]);
+        assert_eq!(cursor.to_string().parse::<Cursor>().unwrap(), cursor);
+    }
+
     #[test]
     fn rejects_garbage() {
-        for bad in ["", "x12", "lzz", "l1", "s~.q"] {
+        // `v` + hex("1,2") and hex("1,2,3,4"): intervals need exactly three parts.
+        for bad in ["", "x12", "lzz", "l1", "s~.q", "v312c32", "v312c322c332c34"] {
             assert!(bad.parse::<Cursor>().is_err(), "{bad}");
         }
     }

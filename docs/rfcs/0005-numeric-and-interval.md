@@ -1,6 +1,6 @@
 - Feature name: `numeric_and_interval`
 - Start date: 2026-10-09
-- Status: **Draft**: awaiting maintainer decisions on the open questions
+- Status: **Accepted** (2026-10-09) by the maintainer, with the recommended answers below
 - RFC PR: to be assigned when this RFC's pull request is opened
 - Tracking issue: to be opened on acceptance
 
@@ -94,8 +94,9 @@ rok_db::sqlx::types::Decimal` and the generated `Cargo.toml` enables `decimal`;
   `INTERVAL...` and maps to `PgInterval`. Arrays of both are allowed.
 - Query parameters and result columns reported by PostgreSQL as `NUMERIC` / `INTERVAL`
   map the same way.
-- Migrations and diffs already keep `NUMERIC(p,s)` exactly; changing precision or scale
-  stays an `ALTER COLUMN ... TYPE` step, marked destructive when it narrows.
+- Migrations and diffs already keep `NUMERIC(p,s)` exactly; changing precision, scale or
+  interval fields is an `ALTER COLUMN ... TYPE` step, marked destructive like every type
+  change (so `--allow-destructive` is needed, even to widen).
 
 ## Limits, documented
 
@@ -151,6 +152,18 @@ version).
    `PgInterval`, so a feature would only add a switch to remember.
 3. **Should `decimal` be on by default?** Recommended: no, like `chrono` and `uuid`;
    `rok-db-gen` enables it in the generated crate when a schema needs it.
+
+# Decisions
+
+Accepted by the maintainer on 2026-10-09:
+
+1. `rust_decimal`, behind a `decimal` feature; `bigdecimal` stays a future possibility.
+2. `INTERVAL` needs no feature.
+3. `decimal` is opt-in (and part of `full`); `rok-db-gen` enables it when a schema needs it.
+
+Shipped as described, with one addition: `Value::Decimal` and `Value::Interval` also have
+cursor encodings, so a keyset cursor over either survives a round trip through its string
+form.
 
 # Future possibilities
 

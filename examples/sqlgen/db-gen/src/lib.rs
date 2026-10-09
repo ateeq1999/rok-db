@@ -9,6 +9,8 @@ mod down;
 #[rustfmt::skip]
 pub mod migrations;
 #[rustfmt::skip]
+pub mod plan;
+#[rustfmt::skip]
 pub mod post;
 #[rustfmt::skip]
 pub mod types;

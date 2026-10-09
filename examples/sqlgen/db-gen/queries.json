@@ -1,6 +1,216 @@
 {
   "queries": {
-    "0e6212920eb6ca61": {
+    "01fb2bc4ce152da4": {
+      "query": "post::add_view",
+      "params": [
+        "INT8"
+      ],
+      "columns": []
+    },
+    "1f9a5c8bada975eb": {
+      "query": "user::emails",
+      "params": [],
+      "columns": [
+        {
+          "name": "email",
+          "type_name": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "4ad8b5c7cd0b5f63": {
+      "query": "plan::cheaper_than",
+      "params": [
+        "NUMERIC"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "price",
+          "type_name": "NUMERIC",
+          "nullable": false
+        },
+        {
+          "name": "period",
+          "type_name": "INTERVAL",
+          "nullable": false
+        },
+        {
+          "name": "trial",
+          "type_name": "INTERVAL",
+          "nullable": true
+        }
+      ]
+    },
+    "695422500fa4456e": {
+      "query": "post::top_for_author",
+      "params": [
+        "INT8",
+        "INT8"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "author_id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "tags",
+          "type_name": "TEXT[]",
+          "nullable": false
+        },
+        {
+          "name": "views",
+          "type_name": "INT4",
+          "nullable": false
+        },
+        {
+          "name": "published_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ]
+    },
+    "6be4360b67eb574c": {
+      "query": "user::count_by_role",
+      "params": [],
+      "columns": [
+        {
+          "name": "role",
+          "type_name": "user_role",
+          "nullable": false
+        },
+        {
+          "name": "total!",
+          "type_name": "INT8",
+          "nullable": null
+        }
+      ]
+    },
+    "7d1ea42c4330e9db": {
+      "query": "post::feed",
+      "params": [],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "author_email",
+          "type_name": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "a13985228491634b": {
+      "query": "user::find_by_email",
+      "params": [
+        "TEXT"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type_name": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "role",
+          "type_name": "user_role",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ]
+    },
+    "cef0d7712635ba2b": {
+      "query": "plan::create_plan",
+      "params": [
+        "TEXT",
+        "NUMERIC",
+        "INTERVAL"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "price",
+          "type_name": "NUMERIC",
+          "nullable": false
+        },
+        {
+          "name": "period",
+          "type_name": "INTERVAL",
+          "nullable": false
+        },
+        {
+          "name": "trial",
+          "type_name": "INTERVAL",
+          "nullable": true
+        }
+      ]
+    },
+    "f84b81a70d714e45": {
       "query": "post::create_post",
       "params": [
         "INT8",
@@ -45,154 +255,12 @@
         }
       ]
     },
-    "14807a75ee526198": {
-      "query": "post::add_view",
-      "params": [
-        "INT8"
-      ],
-      "columns": []
-    },
-    "3df370d4dc6614fd": {
+    "fb78daca5eb04631": {
       "query": "user::promote",
       "params": [
         "INT8"
       ],
       "columns": []
-    },
-    "4995452f629657cf": {
-      "query": "user::emails",
-      "params": [],
-      "columns": [
-        {
-          "name": "email",
-          "type_name": "TEXT",
-          "nullable": false
-        }
-      ]
-    },
-    "71950f0dd3fa85c8": {
-      "query": "user::count_by_role",
-      "params": [],
-      "columns": [
-        {
-          "name": "role",
-          "type_name": "user_role",
-          "nullable": false
-        },
-        {
-          "name": "total!",
-          "type_name": "INT8",
-          "nullable": null
-        }
-      ]
-    },
-    "a3ca47875613cecf": {
-      "query": "post::feed",
-      "params": [],
-      "columns": [
-        {
-          "name": "id",
-          "type_name": "INT8",
-          "nullable": false
-        },
-        {
-          "name": "title",
-          "type_name": "TEXT",
-          "nullable": false
-        },
-        {
-          "name": "author_email",
-          "type_name": "TEXT",
-          "nullable": false
-        }
-      ]
-    },
-    "aecceee1265ed6bf": {
-      "query": "user::find_by_email",
-      "params": [
-        "TEXT"
-      ],
-      "columns": [
-        {
-          "name": "id",
-          "type_name": "INT8",
-          "nullable": false
-        },
-        {
-          "name": "email",
-          "type_name": "TEXT",
-          "nullable": false
-        },
-        {
-          "name": "name",
-          "type_name": "TEXT",
-          "nullable": true
-        },
-        {
-          "name": "role",
-          "type_name": "user_role",
-          "nullable": false
-        },
-        {
-          "name": "created_at",
-          "type_name": "TIMESTAMPTZ",
-          "nullable": false
-        },
-        {
-          "name": "updated_at",
-          "type_name": "TIMESTAMPTZ",
-          "nullable": false
-        },
-        {
-          "name": "deleted_at",
-          "type_name": "TIMESTAMPTZ",
-          "nullable": true
-        }
-      ]
-    },
-    "c1f88f5565d8226a": {
-      "query": "post::top_for_author",
-      "params": [
-        "INT8",
-        "INT8"
-      ],
-      "columns": [
-        {
-          "name": "id",
-          "type_name": "INT8",
-          "nullable": false
-        },
-        {
-          "name": "author_id",
-          "type_name": "INT8",
-          "nullable": false
-        },
-        {
-          "name": "title",
-          "type_name": "TEXT",
-          "nullable": false
-        },
-        {
-          "name": "body",
-          "type_name": "TEXT",
-          "nullable": false
-        },
-        {
-          "name": "tags",
-          "type_name": "TEXT[]",
-          "nullable": false
-        },
-        {
-          "name": "views",
-          "type_name": "INT4",
-          "nullable": false
-        },
-        {
-          "name": "published_at",
-          "type_name": "TIMESTAMPTZ",
-          "nullable": true
-        }
-      ]
     }
   }
 }

@@ -23,5 +23,5 @@ Steps:
    date, record the decisions in a "Decisions" section, and describe the shipped scope.
 5. When implementation changes the design, amend the RFC in the same pull request.
 
-Existing RFCs: `0001-joins` (accepted), `0002-cli` (draft), `0003-multiple-databases`
-(draft), `0004-joined-tuples` (accepted), `0005-numeric-and-interval` (draft).
+Existing RFCs: `0001-joins` (accepted), `0002-cli` (accepted), `0003-multiple-databases`
+(draft), `0004-joined-tuples` (accepted), `0005-numeric-and-interval` (accepted).

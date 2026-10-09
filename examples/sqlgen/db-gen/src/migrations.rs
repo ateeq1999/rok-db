@@ -9,4 +9,10 @@ pub const MIGRATIONS: &[rok_db::migration::Migration] = &[
         up: include_str!("../migrations/0001_init.up.sql"),
         down: include_str!("../migrations/0001_init.down.sql"),
     },
+    rok_db::migration::Migration {
+        version: 2,
+        name: "add_plans",
+        up: include_str!("../migrations/0002_add_plans.up.sql"),
+        down: include_str!("../migrations/0002_add_plans.down.sql"),
+    },
 ];

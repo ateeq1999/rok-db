@@ -8,6 +8,7 @@ pub(crate) enum Feature {
     Chrono,
     Uuid,
     Json,
+    Decimal,
 }
 
 impl Feature {
@@ -16,6 +17,7 @@ impl Feature {
             Feature::Chrono => "chrono",
             Feature::Uuid => "uuid",
             Feature::Json => "json",
+            Feature::Decimal => "decimal",
         }
     }
 }
@@ -55,6 +57,11 @@ pub(crate) fn canonical(sql_type: &str) -> String {
         "json" => "JSON".to_owned(),
         "jsonb" => "JSONB".to_owned(),
         "numeric" | "decimal" => with_args("NUMERIC", args.as_deref()),
+        // `INTERVAL`, `INTERVAL(3)`, `INTERVAL DAY TO SECOND`: the fields are kept so a
+        // change shows up in a diff.
+        interval if interval == "interval" || interval.starts_with("interval ") => {
+            with_args(&interval.to_ascii_uppercase(), args.as_deref())
+        }
         other => match args {
             Some(args) => format!("{other}{args}"),
             None => other.to_owned(),
@@ -103,6 +110,11 @@ pub(crate) fn rust_type(
         ));
     }
     let name = base.split('(').next().unwrap_or(base);
+    let name = if name == "INTERVAL" || name.starts_with("INTERVAL ") {
+        "INTERVAL"
+    } else {
+        name
+    };
     let scalar = match name {
         "SMALLINT" | "SMALLSERIAL" => "i16".to_owned(),
         "INTEGER" | "SERIAL" => "i32".to_owned(),
@@ -136,17 +148,16 @@ pub(crate) fn rust_type(
             features.insert(Feature::Json);
             "rok_db::sqlx::types::JsonValue".to_owned()
         }
+        "NUMERIC" => {
+            features.insert(Feature::Decimal);
+            "rok_db::sqlx::types::Decimal".to_owned()
+        }
+        "INTERVAL" => "rok_db::sqlx::postgres::types::PgInterval".to_owned(),
         other => match enum_path(other) {
             Some(path) if dims == 0 => path,
             Some(_) => {
                 return Err(format!(
                     "arrays of enum types (`{canonical}`) are not supported"
-                ));
-            }
-            None if name == "NUMERIC" => {
-                return Err(format!(
-                    "`{canonical}` has no rok-db column type; use DOUBLE PRECISION, BIGINT \
-                     (for example cents) or TEXT"
                 ));
             }
             None => {
@@ -169,6 +180,8 @@ pub(crate) fn rust_type(
             "rok_db::sqlx::types::Uuid",
             "rok_db::sqlx::types::chrono::DateTime<rok_db::sqlx::types::chrono::Utc>",
             "rok_db::sqlx::types::chrono::NaiveDate",
+            "rok_db::sqlx::types::Decimal",
+            "rok_db::sqlx::postgres::types::PgInterval",
         ];
         if !supported.contains(&scalar.as_str()) {
             return Err(format!("arrays of `{base}` are not supported"));
@@ -201,6 +214,14 @@ mod tests {
         assert_eq!(canonical("INT ARRAY"), "INTEGER[]");
         assert_eq!(canonical("User_Role"), "user_role");
         assert_eq!(canonical("numeric(10, 2)"), "NUMERIC(10,2)");
+        assert_eq!(canonical("decimal"), "NUMERIC");
+        assert_eq!(canonical("interval"), "INTERVAL");
+        assert_eq!(
+            canonical("Interval Day To Second"),
+            "INTERVAL DAY TO SECOND"
+        );
+        assert_eq!(canonical("interval(3)"), "INTERVAL(3)");
+        assert_eq!(canonical("interval[]"), "INTERVAL[]");
     }
 
     #[test]
@@ -217,7 +238,22 @@ mod tests {
                 .contains("DateTime")
         );
         assert!(features.contains(&Feature::Chrono));
-        assert!(t("numeric", &mut features).unwrap_err().contains("NUMERIC"));
+        assert_eq!(
+            t("numeric(10, 2)", &mut features).unwrap(),
+            "rok_db::sqlx::types::Decimal"
+        );
+        assert!(features.contains(&Feature::Decimal));
+        assert_eq!(
+            t("numeric[]", &mut features).unwrap(),
+            "Vec<rok_db::sqlx::types::Decimal>"
+        );
+        for interval in ["interval", "interval day to second", "interval(3)"] {
+            assert_eq!(
+                t(interval, &mut features).unwrap(),
+                "rok_db::sqlx::postgres::types::PgInterval"
+            );
+        }
+        assert!(t("money", &mut features).is_err());
         assert!(t("bytea[]", &mut features).is_err());
     }
 }

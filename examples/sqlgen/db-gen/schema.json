@@ -15,6 +15,58 @@
   ],
   "tables": [
     {
+      "name": "plans",
+      "module": "plan",
+      "doc": [
+        "A subscription plan."
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "BIGSERIAL",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "price",
+          "sql_type": "NUMERIC(10,2)",
+          "nullable": false,
+          "doc": [
+            "Exact money: NUMERIC becomes rust_decimal's Decimal (feature `decimal`)."
+          ]
+        },
+        {
+          "name": "period",
+          "sql_type": "INTERVAL",
+          "nullable": false,
+          "default": "'1 month'",
+          "doc": [
+            "How often it bills: INTERVAL becomes PgInterval."
+          ]
+        },
+        {
+          "name": "trial",
+          "sql_type": "INTERVAL",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "uniques": [
+        {
+          "name": "plans_name_key",
+          "columns": [
+            "name"
+          ]
+        }
+      ]
+    },
+    {
       "name": "posts",
       "module": "post",
       "doc": [
