@@ -1,0 +1,198 @@
+{
+  "queries": {
+    "0e6212920eb6ca61": {
+      "query": "post::create_post",
+      "params": [
+        "INT8",
+        "TEXT",
+        "TEXT[]"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "author_id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "tags",
+          "type_name": "TEXT[]",
+          "nullable": false
+        },
+        {
+          "name": "views",
+          "type_name": "INT4",
+          "nullable": false
+        },
+        {
+          "name": "published_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ]
+    },
+    "14807a75ee526198": {
+      "query": "post::add_view",
+      "params": [
+        "INT8"
+      ],
+      "columns": []
+    },
+    "3df370d4dc6614fd": {
+      "query": "user::promote",
+      "params": [
+        "INT8"
+      ],
+      "columns": []
+    },
+    "4995452f629657cf": {
+      "query": "user::emails",
+      "params": [],
+      "columns": [
+        {
+          "name": "email",
+          "type_name": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "71950f0dd3fa85c8": {
+      "query": "user::count_by_role",
+      "params": [],
+      "columns": [
+        {
+          "name": "role",
+          "type_name": "user_role",
+          "nullable": false
+        },
+        {
+          "name": "total!",
+          "type_name": "INT8",
+          "nullable": null
+        }
+      ]
+    },
+    "a3ca47875613cecf": {
+      "query": "post::feed",
+      "params": [],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "author_email",
+          "type_name": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "aecceee1265ed6bf": {
+      "query": "user::find_by_email",
+      "params": [
+        "TEXT"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type_name": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "role",
+          "type_name": "user_role",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ]
+    },
+    "c1f88f5565d8226a": {
+      "query": "post::top_for_author",
+      "params": [
+        "INT8",
+        "INT8"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "author_id",
+          "type_name": "INT8",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "type_name": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "tags",
+          "type_name": "TEXT[]",
+          "nullable": false
+        },
+        {
+          "name": "views",
+          "type_name": "INT4",
+          "nullable": false
+        },
+        {
+          "name": "published_at",
+          "type_name": "TIMESTAMPTZ",
+          "nullable": true
+        }
+      ]
+    }
+  }
+}

@@ -5,14 +5,18 @@
 //! Most people use the `rok-db-gen` binary; see the crate README.
 
 mod ddl;
+mod describe;
 mod emit;
+mod generate;
 mod ir;
 mod naming;
 mod parse;
+mod queries;
 mod split;
 mod types;
 
 pub use ddl::Rename;
+pub use generate::{Dependency, Generated, Options, differences, generate, write};
 pub use ir::{Column, EnumType, Extra, ForeignKey, Index, Query, QueryKind, Schema, Table};
 pub use parse::{Parsed, SourceFile, parse};
 
