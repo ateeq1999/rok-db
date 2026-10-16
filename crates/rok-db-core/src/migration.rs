@@ -239,10 +239,12 @@ fn run_script<'a>(
     tx: &'a mut Tx,
     sql: &'a str,
 ) -> BoxFuture<'a, std::result::Result<(), sqlx::Error>> {
-    // A plain `&str` runs over the simple query protocol, which allows
-    // several statements (this is what sqlx's own migrator does).
+    // `raw_sql` runs over the simple query protocol, which allows several
+    // statements (this is what sqlx's own migrator does). Migration SQL is
+    // written by the developer, never built from input.
     Box::pin(async move {
-        sqlx::Executor::execute(&mut *tx.inner, sql)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *tx.inner)
             .await
             .map(|_| ())
     })

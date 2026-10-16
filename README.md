@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ateeq1999/rok-db/actions/workflows/ci.yml/badge.svg)](https://github.com/ateeq1999/rok-db/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![MSRV 1.85](https://img.shields.io/badge/MSRV-1.85-orange.svg)](CONTRIBUTING.md#compatibility-policy)
+[![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-orange.svg)](CONTRIBUTING.md#compatibility-policy)
 
 An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github.com/launchbadge/sqlx).
 

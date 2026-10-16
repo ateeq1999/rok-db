@@ -73,7 +73,7 @@ jobs:
         run: cargo run -p rok-db --example blog
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (rust-version)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

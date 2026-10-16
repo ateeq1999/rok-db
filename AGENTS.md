@@ -29,7 +29,7 @@ Ground rules:
 - Public futures are `Send`. Only the `rok-db` facade is public API; `rok-db-core` and
   `rok-db-macros` items it doesn't re-export, and anything `#[doc(hidden)]` or `__private`,
   may change.
-- MSRV is `rust-version` in `Cargo.toml` (1.85); `.cargo/config.toml` makes the resolver pick
+- MSRV is `rust-version` in `Cargo.toml` (1.94); `.cargo/config.toml` makes the resolver pick
   MSRV-compatible dependencies.
 - Database tests need `DATABASE_URL` (a user with `CREATEDB`); without it they skip silently,
   so "0.00s" test runs mean nothing was checked.

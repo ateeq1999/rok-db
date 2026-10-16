@@ -6,7 +6,7 @@
 
 This file is a dense digest for coding agents. Read `AGENTS.md` for the task skills, the
 README for examples and `docs/rfcs/` for designs. Crates: `rok-db` (facade, the only public
-API), `rok-db-core` (runtime), `rok-db-macros` (derive), `rok-db-codegen` (`rok-db-gen`). MSRV 1.85. License: MIT OR
+API), `rok-db-core` (runtime), `rok-db-macros` (derive), `rok-db-codegen` (`rok-db-gen`). MSRV 1.94 (sqlx 0.9). License: MIT OR
 Apache-2.0. Current release: 0.4.0 on crates.io (`rok-db = "0.4"`); everything below is
 released.
 

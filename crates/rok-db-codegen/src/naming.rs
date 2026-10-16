@@ -87,10 +87,10 @@ pub(crate) fn singular(word: &str) -> String {
             return format!("{prefix}_{single}");
         }
     }
-    if let Some(stem) = word.strip_suffix("ies") {
-        if !stem.is_empty() {
-            return format!("{stem}y");
-        }
+    if let Some(stem) = word.strip_suffix("ies")
+        && !stem.is_empty()
+    {
+        return format!("{stem}y");
     }
     for suffix in ["sses", "shes", "ches", "xes", "zes"] {
         if word.ends_with(suffix) {
@@ -105,10 +105,10 @@ pub(crate) fn singular(word: &str) -> String {
 
 /// Plural of a singular English word, for relation names.
 pub(crate) fn plural(word: &str) -> String {
-    if let Some(stem) = word.strip_suffix('y') {
-        if !stem.ends_with(['a', 'e', 'i', 'o', 'u']) {
-            return format!("{stem}ies");
-        }
+    if let Some(stem) = word.strip_suffix('y')
+        && !stem.ends_with(['a', 'e', 'i', 'o', 'u'])
+    {
+        return format!("{stem}ies");
     }
     if ["s", "x", "z", "ch", "sh"]
         .iter()

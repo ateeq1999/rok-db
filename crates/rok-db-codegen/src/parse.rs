@@ -498,10 +498,10 @@ fn resolve_references(schema: &mut Schema) {
         .collect();
     for table in &mut schema.tables {
         for fk in &mut table.foreign_keys {
-            if fk.ref_columns.is_empty() {
-                if let Some((_, key)) = keys.iter().find(|(name, _)| *name == fk.ref_table) {
-                    fk.ref_columns = key.clone();
-                }
+            if fk.ref_columns.is_empty()
+                && let Some((_, key)) = keys.iter().find(|(name, _)| *name == fk.ref_table)
+            {
+                fk.ref_columns = key.clone();
             }
         }
     }

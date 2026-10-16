@@ -8,7 +8,10 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sqlx::{Column as _, Connection, Executor as _, PgConnection, TypeInfo as _};
+use sqlx::{
+    AssertSqlSafe, Column as _, Connection, Executor as _, PgConnection, SqlSafeStr as _,
+    TypeInfo as _,
+};
 
 use crate::Error;
 use crate::ir::Query;
@@ -134,8 +137,10 @@ async fn describe_in_temp_db(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
     let name = format!("rok_gen_{}_{nanos}", std::process::id());
-    admin
-        .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
+    // `name` is generated above, never input; the scripts below are the
+    // project's own migrations.
+    sqlx::raw_sql(AssertSqlSafe(format!(r#"CREATE DATABASE "{name}""#)))
+        .execute(&mut admin)
         .await
         .map_err(|e| {
             db_error(
@@ -148,21 +153,27 @@ async fn describe_in_temp_db(
             .await
             .map_err(|e| db_error("can't connect to the temporary database", e))?;
         for (i, sql) in migrations_sql.iter().enumerate() {
-            conn.execute(sql.as_str()).await.map_err(|e| {
-                db_error(
-                    &format!("migration {} failed in the temporary database", i + 1),
-                    e,
-                )
-            })?;
+            sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
+                .execute(&mut conn)
+                .await
+                .map_err(|e| {
+                    db_error(
+                        &format!("migration {} failed in the temporary database", i + 1),
+                        e,
+                    )
+                })?;
         }
         let mut out = Vec::new();
         for query in queries {
-            let described = conn.describe(query.sql.as_str()).await.map_err(|e| {
-                Error::at(
-                    &query.location,
-                    format!("PostgreSQL rejected `{}`: {e}", query.name),
-                )
-            })?;
+            let described = conn
+                .describe(AssertSqlSafe(query.sql.as_str()).into_sql_str())
+                .await
+                .map_err(|e| {
+                    Error::at(
+                        &query.location,
+                        format!("PostgreSQL rejected `{}`: {e}", query.name),
+                    )
+                })?;
             let params = match described.parameters() {
                 Some(sqlx::Either::Left(types)) => {
                     types.iter().map(|t| t.name().to_owned()).collect()
@@ -192,9 +203,11 @@ async fn describe_in_temp_db(
     }
     .await;
     // Drop the temporary database even when something failed.
-    let dropped = admin
-        .execute(format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#).as_str())
-        .await;
+    let dropped = sqlx::raw_sql(AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#
+    )))
+    .execute(&mut admin)
+    .await;
     let out = result?;
     dropped.map_err(|e| db_error("can't drop the temporary database", e))?;
     Ok(out)
