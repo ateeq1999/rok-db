@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod migrate;
+
 use rok_db_codegen::{Dependency, Options, Rename, differences, generate, write};
 
 const USAGE: &str = "\
@@ -11,6 +13,9 @@ rok-db-gen: generate a rok-db crate (models, queries, migrations) from .sql file
 USAGE:
     rok-db-gen generate [OPTIONS]   write the generated crate
     rok-db-gen check [OPTIONS]      fail when the generated crate is out of date (for CI)
+    rok-db-gen migrate status       list migrations: applied, pending, edited or unknown
+    rok-db-gen migrate up           apply every pending migration
+    rok-db-gen migrate down         revert the latest migration (--steps N for more)
 
 OPTIONS:
     --config <file>         settings file (default: rok-db.toml, when it exists)
@@ -22,11 +27,14 @@ OPTIONS:
                             (`users.name=full_name`); repeatable
     --allow-destructive     allow steps that drop data or can fail on existing rows
     --strict                fail on warnings (queries without tenant or soft-delete filters)
+    --steps <n>             migrate down: how many migrations to revert (default: 1)
+    --database-url <url>    migrate: the database (default: DATABASE_URL)
     -h, --help              show this help
 
 ENVIRONMENT:
-    DATABASE_URL            PostgreSQL server for checking new or changed queries; the user
-                            needs CREATEDB (a temporary database is created and dropped)
+    DATABASE_URL            generate: PostgreSQL server for checking new or changed queries;
+                            the user needs CREATEDB (a temporary database is created and
+                            dropped). migrate: the database to migrate.
 
 rok-db.toml:
     [gen]
@@ -70,6 +78,20 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let command = match args.next().as_deref() {
         Some("generate") => Command::Generate,
         Some("check") => Command::Check,
+        Some("migrate") => {
+            let action = match args.next().as_deref() {
+                Some("status") => migrate::Action::Status,
+                Some("up") => migrate::Action::Up,
+                Some("down") => migrate::Action::Down { steps: 1 },
+                Some(other) => {
+                    return Err(format!(
+                        "unknown migrate command `{other}`: expected status, up or down"
+                    ));
+                }
+                None => return Err("`migrate` needs status, up or down".to_owned()),
+            };
+            return run_migrate(action, args.collect());
+        }
         Some("-h" | "--help") | None => {
             print!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
@@ -140,6 +162,48 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             }
         }
     }
+}
+
+/// `migrate status|up|down`: only --config, --output, --steps and --database-url apply.
+fn run_migrate(mut action: migrate::Action, args: Vec<String>) -> Result<ExitCode, String> {
+    let mut flags = Flags::default();
+    let mut database_url = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        match arg.as_str() {
+            "--config" => flags.config = Some(PathBuf::from(value("--config")?)),
+            "--output" => flags.output = Some(PathBuf::from(value("--output")?)),
+            "--database-url" => database_url = Some(value("--database-url")?),
+            "--steps" => {
+                let steps = value("--steps")?;
+                let steps = steps
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("--steps `{steps}`: expected a positive number"))?;
+                match &mut action {
+                    migrate::Action::Down { steps: s } => *s = steps,
+                    _ => return Err("--steps only applies to `migrate down`".to_owned()),
+                }
+            }
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            other => {
+                return Err(format!(
+                    "`migrate` doesn't take `{other}`; it takes --config, --output, --steps \
+                     and --database-url"
+                ));
+            }
+        }
+    }
+    let options = options(flags)?;
+    let database_url = database_url
+        .or(options.database_url.clone())
+        .ok_or("`migrate` needs a database: set DATABASE_URL or pass --database-url")?;
+    migrate::run(action, &options.output.join("migrations"), &database_url)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

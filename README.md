@@ -699,6 +699,7 @@ cargo install rok-db-codegen
 rok-db-gen generate                        # db-gen/: models, queries, migration 0001_init
 rok-db-gen generate --migration add_slug   # after editing db/*.sql
 rok-db-gen check                           # in CI
+rok-db-gen migrate up                      # apply pending migrations to DATABASE_URL
 ```
 
 ```rust

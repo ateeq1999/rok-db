@@ -123,6 +123,8 @@ struct Post {
     `db-gen/schema.json`, applied with `db_gen::up(&db)` / `db_gen::down(&db, n)`.
   - Commands: `rok-db-gen generate [--migration name] [--rename a=b] [--allow-destructive]`
     and `rok-db-gen check` (CI). Settings live in `rok-db.toml` `[gen]`.
+  - `rok-db-gen migrate status|up|down [--steps N] [--database-url url]` runs the files in
+    `db-gen/migrations` (same checksums as `db_gen::up`); `status` exits 1 on drift.
   - Directives: `-- rok:tenant` (column), `-- rok:down` (undo SQL for the statement above),
     `-- param: $2 name`; `AS "col!"` / `AS "col?"` override nullability. See `docs/v4.md`.
 
