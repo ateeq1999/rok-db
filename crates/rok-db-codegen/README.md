@@ -11,6 +11,9 @@ cargo install rok-db-codegen
 rok-db-gen generate                        # db/*.sql -> db-gen/
 rok-db-gen generate --migration add_slug   # after changing the schema
 rok-db-gen check                           # CI: fail when db-gen/ is stale
+rok-db-gen migrate status                  # which migrations DATABASE_URL has applied
+rok-db-gen migrate up                      # apply pending migrations (a deploy step)
+rok-db-gen migrate down --steps 1          # revert the latest one
 ```
 
 ```sql

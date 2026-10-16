@@ -21,6 +21,7 @@ Pipeline (`crates/rok-db-codegen/src`):
 | `emit.rs` | models, enums, relations, formatting (prettyplease) |
 | `generate.rs` | the whole run: files in memory, `write`, `differences` (check) |
 | `main.rs` | the CLI and `rok-db.toml` |
+| `migrate.rs` | `rok-db-gen migrate status` / `up` / `down`: loads `<output>/migrations`, calls `rok_db::migration` |
 
 Rules:
 

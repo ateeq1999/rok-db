@@ -25,8 +25,9 @@ syn = { version = "2", features = ["full"] }
 prettyplease = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rok-db = { workspace = true }
 sqlx = { workspace = true }
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 [lints]

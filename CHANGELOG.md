@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `rok-db-gen migrate status|up|down [--steps N]` (RFC 0002) applies, reverts and lists the
+  generated migrations without a Rust program, using `DATABASE_URL` or `--database-url`.
+  `status` exits 1 when an applied migration was edited or the database has one the files
+  don't. The checksums match `db_gen::up`, so the two can be mixed.
 - `NUMERIC` and `INTERVAL` columns (RFC 0005). `NUMERIC` maps to `rust_decimal`'s `Decimal`
   behind the new `decimal` feature (in `full`), `INTERVAL` to sqlx's `PgInterval`. Both work
   in models, filters, `set`, arrays, `COPY` and keyset cursors (`Value::Decimal`,
