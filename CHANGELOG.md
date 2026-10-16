@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** rok-db uses sqlx 0.9 (RFC 0006), so the MSRV is now Rust 1.94. rok-db's own
+  API is unchanged. Code that calls sqlx directly through `rok_db::sqlx` follows sqlx 0.9:
+  `query()` and `raw_sql()` take `&'static str` or `AssertSqlSafe(..)` for audited dynamic
+  SQL. See sqlx's changelog for the rest.
+
 ### Added
 
 - `rok-db-gen migrate status|up|down [--steps N]` (RFC 0002) applies, reverts and lists the

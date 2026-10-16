@@ -57,7 +57,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo +1.85 check --workspace --all-targets --all-features   # MSRV
+cargo +1.94 check --workspace --all-targets --all-features   # MSRV
 cargo deny check                                             # licenses and advisories
 ```
 
@@ -139,7 +139,7 @@ Breaking changes add `!` after the type (`feat(query)!: …`) and a
   `rok-db-core` and `rok-db-macros` items not re-exported by `rok-db`, and
   anything `#[doc(hidden)]` or named `__private`, may change at any time.
 - **MSRV.** The minimum supported Rust version is the `rust-version` in
-  `Cargo.toml` (currently 1.85) and is tested in CI. Raising it is a minor
+  `Cargo.toml` (currently 1.94) and is tested in CI. Raising it is a minor
   version bump, is noted in the changelog and only happens for a concrete
   benefit. The dependency resolver is configured (`.cargo/config.toml`) to
   pick versions compatible with the MSRV.

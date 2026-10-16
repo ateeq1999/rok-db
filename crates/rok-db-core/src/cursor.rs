@@ -73,7 +73,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Result<Vec<u8>, Error> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(Error::InvalidCursor("odd hex length".into()));
     }
     (0..s.len())

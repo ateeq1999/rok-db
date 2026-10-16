@@ -199,7 +199,7 @@ impl Db {
     {
         let mut tx = self.begin().await?;
         if let Some(sql) = options.set_transaction_sql() {
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .execute(&mut *tx.inner)
                 .await
                 .map_err(Error::from)?;
@@ -221,7 +221,7 @@ impl Db {
     /// Execute one or more raw SQL statements without parameters (e.g. a
     /// schema script) and return the total number of affected rows.
     pub async fn execute(&self, sql: &str) -> Result<u64> {
-        Ok(sqlx::raw_sql(sql)
+        Ok(sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&self.pool)
             .await?
             .rows_affected())
@@ -684,11 +684,11 @@ macro_rules! delegate_executor {
                 $inner.fetch_optional(query)
             }
 
-            fn prepare_with<'e, 'q: 'e>(
+            fn prepare_with<'e>(
                 self,
-                sql: &'q str,
+                sql: sqlx::SqlStr,
                 parameters: &'e [PgTypeInfo],
-            ) -> BoxFuture<'e, std::result::Result<PgStatement<'q>, sqlx::Error>>
+            ) -> BoxFuture<'e, std::result::Result<PgStatement, sqlx::Error>>
             where
                 'c: 'e,
             {
@@ -696,9 +696,9 @@ macro_rules! delegate_executor {
                 $inner.prepare_with(sql, parameters)
             }
 
-            fn describe<'e, 'q: 'e>(
+            fn describe<'e>(
                 self,
-                sql: &'q str,
+                sql: sqlx::SqlStr,
             ) -> BoxFuture<'e, std::result::Result<Describe<Postgres>, sqlx::Error>>
             where
                 'c: 'e,

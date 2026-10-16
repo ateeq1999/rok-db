@@ -131,7 +131,7 @@ where
     let args = sql
         .arguments()
         .map_err(|e| sqlx::Error::Encode(e.to_string().into()))?;
-    let result = sqlx::query_as_with::<_, T, _>(sql.as_str(), args)
+    let result = sqlx::query_as_with::<_, T, _>(sqlx::AssertSqlSafe(sql.as_str()), args)
         .fetch_all(x)
         .await;
     probe.finish(&result, |rows| rows.len() as u64);
@@ -150,7 +150,7 @@ where
     let args = sql
         .arguments()
         .map_err(|e| sqlx::Error::Encode(e.to_string().into()))?;
-    let result = sqlx::query_as_with::<_, T, _>(sql.as_str(), args)
+    let result = sqlx::query_as_with::<_, T, _>(sqlx::AssertSqlSafe(sql.as_str()), args)
         .fetch_optional(x)
         .await;
     probe.finish(&result, |row| row.is_some() as u64);
@@ -168,7 +168,9 @@ where
     let args = sql
         .arguments()
         .map_err(|e| sqlx::Error::Encode(e.to_string().into()))?;
-    let result = sqlx::query_with(sql.as_str(), args).fetch_all(x).await;
+    let result = sqlx::query_with(sqlx::AssertSqlSafe(sql.as_str()), args)
+        .fetch_all(x)
+        .await;
     probe.finish(&result, |rows| rows.len() as u64);
     result
 }
@@ -185,7 +187,7 @@ where
     let args = sql
         .arguments()
         .map_err(|e| sqlx::Error::Encode(e.to_string().into()))?;
-    let result = sqlx::query_scalar_with::<_, T, _>(sql.as_str(), args)
+    let result = sqlx::query_scalar_with::<_, T, _>(sqlx::AssertSqlSafe(sql.as_str()), args)
         .fetch_one(x)
         .await;
     probe.finish(&result, |_| 1);
@@ -263,7 +265,7 @@ pub(crate) async fn execute<'e, E: Executor<'e>>(
         executor.__touch(table);
     }
     let probe = Probe::start(executor.__context(), sql, writes, false);
-    let result = sqlx::query_with(sql.as_str(), args)
+    let result = sqlx::query_with(sqlx::AssertSqlSafe(sql.as_str()), args)
         .execute(executor)
         .await
         .map(|r| r.rows_affected());
@@ -283,14 +285,14 @@ where
     match pool {
         Some(pool) => Box::pin(async_stream::try_stream! {
             let args = sql.arguments()?;
-            let mut rows = sqlx::query_as_with::<_, T, _>(sql.as_str(), args).fetch(&pool);
+            let mut rows = sqlx::query_as_with::<_, T, _>(sqlx::AssertSqlSafe(sql.as_str()), args).fetch(&pool);
             while let Some(row) = rows.try_next().await? {
                 yield row;
             }
         }),
         None => Box::pin(async_stream::try_stream! {
             let args = sql.arguments()?;
-            let mut rows = sqlx::query_as_with::<_, T, _>(sql.as_str(), args).fetch(executor);
+            let mut rows = sqlx::query_as_with::<_, T, _>(sqlx::AssertSqlSafe(sql.as_str()), args).fetch(executor);
             while let Some(row) = rows.try_next().await? {
                 yield row;
             }

@@ -1368,31 +1368,32 @@ impl<M: Model> Update<M> {
                 Assign::Raw(raw, params) => sql.push_raw(raw, params),
             };
         });
-        if let Some(updated_at) = M::UPDATED_AT_COLUMN {
-            if !self.is_set(updated_at) {
-                sql.push(", ").push_ident(updated_at).push(" = now()");
-            }
+        if let Some(updated_at) = M::UPDATED_AT_COLUMN
+            && !self.is_set(updated_at)
+        {
+            sql.push(", ").push_ident(updated_at).push(" = now()");
         }
-        if let Some(version) = M::VERSION_COLUMN {
-            if !self.is_set(version) {
-                sql.push(", ")
-                    .push_ident(version)
-                    .push(" = ")
-                    .push_ident(version)
-                    .push(" + 1");
-            }
+        if let Some(version) = M::VERSION_COLUMN
+            && !self.is_set(version)
+        {
+            sql.push(", ")
+                .push_ident(version)
+                .push(" = ")
+                .push_ident(version)
+                .push(" + 1");
         }
         let implicit = implicit::<M>(self.trashed, self.scoped, self.all_tenants);
         push_where(sql, " WHERE ", self.filters.iter().chain(&implicit));
     }
 
     fn check(&self) -> Result<()> {
-        if let Some(tenant) = M::TENANT_COLUMN {
-            if self.is_set(tenant) && crate::tenant::current().is_some() {
-                return Err(Error::InvalidQuery(format!(
-                    "can't change the tenant column `{tenant}` inside a tenant scope"
-                )));
-            }
+        if let Some(tenant) = M::TENANT_COLUMN
+            && self.is_set(tenant)
+            && crate::tenant::current().is_some()
+        {
+            return Err(Error::InvalidQuery(format!(
+                "can't change the tenant column `{tenant}` inside a tenant scope"
+            )));
         }
         if self.sets.is_empty() {
             return Err(Error::InvalidQuery(format!(
@@ -1555,15 +1556,15 @@ impl Conflict {
         }
         // Never update another tenant's row: the conflicting row must belong
         // to the tenant being written (no row is returned otherwise).
-        if let Some(tenant) = M::TENANT_COLUMN {
-            if inserted.contains(&tenant) {
-                sql.push(" WHERE ")
-                    .push_ident(M::TABLE)
-                    .push(".")
-                    .push_ident(tenant)
-                    .push(" = EXCLUDED.")
-                    .push_ident(tenant);
-            }
+        if let Some(tenant) = M::TENANT_COLUMN
+            && inserted.contains(&tenant)
+        {
+            sql.push(" WHERE ")
+                .push_ident(M::TABLE)
+                .push(".")
+                .push_ident(tenant)
+                .push(" = EXCLUDED.")
+                .push_ident(tenant);
         }
         Ok(())
     }
@@ -1677,11 +1678,11 @@ impl<M: Model> Insert<M> {
 
     fn build(&self, strict: bool) -> Result<Sql> {
         let mut values = self.values.clone();
-        if let Some(column) = M::TENANT_COLUMN {
-            if let Some(tenant) = crate::model::tenant_override::<M>(column) {
-                values.retain(|(c, _, _)| *c != column);
-                values.push((column, "?".into(), vec![tenant]));
-            }
+        if let Some(column) = M::TENANT_COLUMN
+            && let Some(tenant) = crate::model::tenant_override::<M>(column)
+        {
+            values.retain(|(c, _, _)| *c != column);
+            values.push((column, "?".into(), vec![tenant]));
         }
         for ts in [M::CREATED_AT_COLUMN, M::UPDATED_AT_COLUMN]
             .into_iter()

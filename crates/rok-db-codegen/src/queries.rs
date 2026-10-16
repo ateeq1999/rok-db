@@ -209,16 +209,16 @@ fn guess_name(tokens: &[Token], i: usize) -> Option<String> {
     let (start, end) = if wrapped { (i - 2, i + 1) } else { (i, i) };
     let prev = tokens.get(start.wrapping_sub(1));
     // col = $1, lower(col) = lower($1), col LIKE $1
-    if is_comparison(prev) {
-        if let Some(name) = start.checked_sub(2).and_then(|k| operand_before(tokens, k)) {
-            return Some(name);
-        }
+    if is_comparison(prev)
+        && let Some(name) = start.checked_sub(2).and_then(|k| operand_before(tokens, k))
+    {
+        return Some(name);
     }
     // $1 = col
-    if is_comparison(tokens.get(end + 1)) {
-        if let Some(name) = operand_after(tokens, end + 2) {
-            return Some(name);
-        }
+    if is_comparison(tokens.get(end + 1))
+        && let Some(name) = operand_after(tokens, end + 2)
+    {
+        return Some(name);
     }
     let prev = tokens.get(i.wrapping_sub(1));
     if is_keyword(prev, Keyword::LIMIT) {
@@ -302,12 +302,11 @@ fn insert_names(tokens: &[Token], mut i: usize, names: &mut [Option<String>]) {
 }
 
 fn assign(item: &[&Token], position: usize, columns: &[String], names: &mut [Option<String>]) {
-    if let ([t], Some(column)) = (item, columns.get(position)) {
-        if let Some(n) = placeholder(t) {
-            if names[n - 1].is_none() {
-                names[n - 1] = Some(column.clone());
-            }
-        }
+    if let ([t], Some(column)) = (item, columns.get(position))
+        && let Some(n) = placeholder(t)
+        && names[n - 1].is_none()
+    {
+        names[n - 1] = Some(column.clone());
     }
 }
 

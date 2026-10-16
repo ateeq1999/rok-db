@@ -22,7 +22,7 @@ cargo clippy --workspace --all-targets -- -D warnings          # default feature
 cargo test --workspace --all-features
 cargo test --workspace --no-default-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
-cargo +1.85 check --workspace --all-targets --all-features      # MSRV
+cargo +1.94 check --workspace --all-targets --all-features      # MSRV
 cargo deny check                                                # licenses and advisories
 cargo run -p rok-db --example blog                              # needs DATABASE_URL
 ```

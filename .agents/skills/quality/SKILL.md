@@ -55,7 +55,7 @@ Run the `check` skill first; this list covers what the tools don't catch. Read t
 
 - New dependencies need an RFC, are optional behind a feature when possible, and pass
   `cargo deny check`.
-- Builds on the MSRV (`cargo +1.85 check`); every feature builds on its own.
+- Builds on the MSRV (`cargo +1.94 check`); every feature builds on its own.
 
 ## Report
 

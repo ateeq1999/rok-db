@@ -40,7 +40,7 @@ impl TestDb {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let mut conn = PgConnection::connect_with(&admin).await?;
-        sqlx::query(&format!(r#"CREATE DATABASE "{name}""#))
+        sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{name}""#)))
             .execute(&mut conn)
             .await?;
         conn.close().await?;
@@ -85,9 +85,11 @@ impl Drop for TestDb {
                 .build()?;
             runtime.block_on(async move {
                 let mut conn = PgConnection::connect_with(&admin).await?;
-                sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#))
-                    .execute(&mut conn)
-                    .await?;
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#
+                )))
+                .execute(&mut conn)
+                .await?;
                 conn.close().await?;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
             })
