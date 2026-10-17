@@ -5,5 +5,5 @@ input = "db"
 output = "db-gen"
 crate_name = "sqlgen-db"
 # Inside this repository the generated crate uses the local rok-db; a real
-# project would write `rok_db_version = "0.4"` instead.
+# project would write `rok_db_version = "0.5"` instead.
 rok_db_path = "../../crates/rok-db"
