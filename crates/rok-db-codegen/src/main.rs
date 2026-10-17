@@ -41,7 +41,7 @@ rok-db.toml:
     input = \"db\"
     output = \"db-gen\"
     crate_name = \"db-gen\"
-    rok_db_version = \"0.4\"       # or: rok_db_path = \"crates/rok-db\"
+    rok_db_version = \"0.5\"       # or: rok_db_path = \"crates/rok-db\"
     strict = false
 ";
 

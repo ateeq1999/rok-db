@@ -62,7 +62,7 @@ impl Options {
     }
 }
 
-/// `0.4` for rok-db-codegen 0.4.x: the matching rok-db release.
+/// `0.5` for rok-db-codegen 0.5.x: the matching rok-db release.
 fn default_version() -> String {
     env!("CARGO_PKG_VERSION")
         .splitn(3, '.')

@@ -19,7 +19,7 @@ An ergonomic, type-safe async ORM for PostgreSQL, built on [sqlx](https://github
 
 ```toml
 [dependencies]
-rok-db = { version = "0.4", features = ["chrono", "uuid", "json"] }
+rok-db = { version = "0.5", features = ["chrono", "uuid", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
